@@ -119,6 +119,11 @@ relay/
   vendor/                 -- вендоренная relay-машинерия tg-ws-proxy (MIT)
   tg-transparent-relay.service -- systemd unit
   setup_redirect.sh        -- iptables REDIRECT apply/remove/status
+  redirect_watchdog.sh     -- проверяет и восстанавливает REDIRECT-правила,
+                             если их смахнёт посторонний сервис
+  tg-redirect-watchdog.service/.timer -- systemd unit + таймер (каждые 5 мин)
+  mtproxy_relay.py         -- настоящий MTProxy с секретом (альтернатива)
+  tg-mtproxy-relay.service -- systemd unit для mtproxy_relay.py
   cf_worker/               -- опциональный fallback для passthrough
                              (web.telegram.org и т.п.) через Cloudflare
                              Worker -- см. cf_worker/README.md
@@ -162,9 +167,20 @@ systemctl enable --now tg-transparent-relay
 # Прозрачный REDIRECT (нужен root, меняет iptables)
 sudo bash relay/setup_redirect.sh apply
 sudo bash relay/setup_redirect.sh status   # проверить, что правила встали
+
+# Watchdog: правила REDIRECT живут в nat OUTPUT независимо от самого
+# relay-сервиса, и их может смахнуть побочным эффектом какой-то другой,
+# формально не связанный процесс (живой случай 2026-08-23 — см. CLAUDE.md,
+# краш-луп zapret2.service из z2r_autobench задел их своим собственным
+# "Clearing iptables"). Сам relay при этом продолжает работать штатно и
+# не может это заметить — таймер раз в 5 минут проверяет и молча
+# восстанавливает, если правила пропали целиком.
+cp relay/tg-redirect-watchdog.service relay/tg-redirect-watchdog.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now tg-redirect-watchdog.timer
 ```
 
-Откат: `sudo bash relay/setup_redirect.sh remove` + `systemctl disable --now tg-transparent-relay`.
+Откат: `sudo bash relay/setup_redirect.sh remove` + `systemctl disable --now tg-transparent-relay tg-redirect-watchdog.timer`.
 
 **Слушать `transparent_relay.py` ТОЛЬКО на `127.0.0.1`** — без секрета
 нет контроля доступа, трафик должен приходить исключительно через
@@ -172,6 +188,19 @@ sudo bash relay/setup_redirect.sh status   # проверить, что прав
 
 ## Что требует внимания при эксплуатации
 
+- **REDIRECT-правила в `nat OUTPUT` может смахнуть побочным эффектом
+  совершенно посторонний сервис** — живой случай 2026-08-23 на NETH-4:
+  краш-луп `zapret2.service` (из отдельного репо `z2r_autobench`, три
+  рестарта подряд за ~20с) стёр все правила Zenith-TG в `nat OUTPUT`,
+  хотя формально разные таблицы/логика — `relay/transparent_relay.py`
+  при этом продолжал работать штатно (слушает только `127.0.0.1:8447`,
+  ему всё равно, заворачивает ли что-то трафик), просто трафик перестал
+  доходить, и телеграм на iOS через VLESS сломался тихо на всю ночь,
+  никто не заметил. Митигировано `relay/redirect_watchdog.sh` +
+  `tg-redirect-watchdog.timer` (раз в 5 минут проверяет и молча
+  восстанавливает, если правил REDIRECT не осталось вообще) — см.
+  «Развёртывание на сервере» выше. Не решает первопричину (это не в
+  нашей власти — сторонний сервис), только сокращает окно простоя.
 - `149.154.167.220` (или найденный аналог) может сам попасть в
   блэклист в будущем — тогда `dc_redirects` в `transparent_relay.py`
   нужно будет обновить на новый рабочий IP; Cloudflare-fallback

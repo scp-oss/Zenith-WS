@@ -307,3 +307,31 @@ port.
   all in `relay/transparent_relay.py` as of commit `14135fc` (main
   branch, pushed directly — this repo doesn't currently use a designated
   feature branch the way z2r_autobench does).
+
+## REDIRECT rules can be silently wiped by an unrelated service (since 2026-08-23)
+
+- Live incident on NETH-4: `zapret2.service` (separate repo,
+  `z2r_autobench`) crash-looped three times in ~20s overnight (its own
+  bug, see that repo's `CLAUDE.md` — a `/opt/zapret2/lua` symlink hid the
+  real core lua library files). Each stop/start cycle ran that project's
+  own `init.d` iptables clear/apply logic — and despite being a formally
+  unrelated table/chain from Zenith-TG's own `nat OUTPUT` REDIRECT rules,
+  it wiped them out too. `relay/transparent_relay.py` kept running the
+  whole time without any indication of a problem (it only listens on
+  `127.0.0.1:8447` — whether traffic actually gets redirected there is
+  invisible to it), so Telegram on iOS over VLESS silently broke
+  overnight and nobody noticed until morning, well after the YouTube
+  outage from the same root cause had already been found and fixed.
+- Mitigated (not root-caused, since the other service isn't ours to fix)
+  via `relay/redirect_watchdog.sh` + `tg-redirect-watchdog.timer` — runs
+  every 5 minutes, checks `iptables -t nat -S OUTPUT` for any `-j
+  REDIRECT` rule, and if there are truly zero (not partial corruption —
+  that class hasn't been observed) runs `setup_redirect.sh remove` then
+  `apply` to restore. Deliberately `remove` before `apply`, never a bare
+  re-`apply` — `setup_redirect.sh apply` uses `iptables -A` with no
+  existence check, so calling it on top of already-present rules
+  duplicates every REDIRECT entry instead of being a no-op.
+- Not yet installed on NETH-4 as of this commit — `cp
+  relay/tg-redirect-watchdog.{service,timer} /etc/systemd/system/ &&
+  systemctl daemon-reload && systemctl enable --now
+  tg-redirect-watchdog.timer`, see README.md "Развёртывание на сервере".

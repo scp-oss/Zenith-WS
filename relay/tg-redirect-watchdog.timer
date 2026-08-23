@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically check Zenith-TG REDIRECT rules are still applied
+
+[Timer]
+# Живой инцидент 2026-08-23: правила пропали ночью и никто не заметил до
+# утра -- 5 минут достаточно быстро, чтобы окно "телеграм тихо не работает"
+# было коротким, не создавая при этом заметной нагрузки (проверка -- один
+# iptables -S, дорогая часть — remove+apply -- срабатывает только когда
+# правил реально нет).
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
