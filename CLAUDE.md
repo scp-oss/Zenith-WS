@@ -2,15 +2,18 @@
 
 Operational notes for Claude sessions working on this repo — dense, for an
 agent, not prose for an external reader (that's what README.md is for).
-Do not put server names, individual people's names, or unpublished/draft
-project names here — same public-repo constraint as README.md (NETH-4 is
-an internal codename already used throughout this engagement, not a real
-hostname — same convention as z2r_autobench's own CLAUDE.md).
+Do not put server names, ISP/provider names, individual people's names,
+or unpublished/draft project names here — same public-repo constraint as
+README.md. `Server A`/`Server B`/etc. and `Provider A`/`Provider B`/etc.
+below are anonymized codenames, not real hostnames or ISPs — a consistent
+codename per real server/provider, same convention as z2r_autobench's own
+CLAUDE.md (2026-08-26: retroactively scrubbed a real hostname that had
+crept in here to this codename).
 
 ## Android MTProto investigation (started 2026-08-22)
 
 **Status: mitigated via `mtproxy_relay.py`, deployed and confirmed working
-on NETH-4** — real MTProto sessions on multiple DCs (DC1/DC2/DC2m/DC4m/
+on Server A** — real MTProto sessions on multiple DCs (DC1/DC2/DC2m/DC4m/
 DC203) closing normally with substantial two-way data (one session moved
 1.2MB down), verified live in `journalctl -u tg-mtproxy-relay`. Root
 cause of *why* `transparent_relay.py`'s no-secret path fails on Android
@@ -18,8 +21,8 @@ is still UNRESOLVED (see the trail below, kept intact for context).
 
 **One open caveat, NOT independently verified:** all confirmed-working
 sessions were captured with the Android device on the same home Wi-Fi as
-NETH-4 (source IP `192.168.0.24`, a LAN peer address — NOT `192.168.0.40`,
-which is what NETH-4's own tunnel-terminated traffic shows elsewhere in
+Server A (source IP `192.168.0.24`, a LAN peer address — NOT `192.168.0.40`,
+which is what Server A's own tunnel-terminated traffic shows elsewhere in
 this doc). `tg://proxy?server=192.168.0.40&...` points at a **private**
 RFC1918 address, unreachable from outside that LAN by definition. Whether
 Happ (the Android VLESS client) actually tunnels traffic to a private
@@ -30,7 +33,7 @@ this same link keeps working once the phone leaves that Wi-Fi network —
 untested; the user judged it likely fine given their client is in
 full-tunnel mode, but flagged and not proven. **If it turns out NOT to
 work away from home:** the fix is port-forwarding `9443` on the home
-router (Keenetic) to NETH-4 and pointing the `tg://proxy` link's `server=`
+router (Keenetic) to Server A and pointing the `tg://proxy` link's `server=`
 at the router's public IP/DDNS instead of `192.168.0.40` — same principle
 already used for whatever address the VLESS inbound itself is reachable
 on from outside. Not done as of this writing; only prepare it if the
@@ -46,7 +49,7 @@ one ran out of context) doesn't have to re-derive any of it.
 
 1. **DHCP/DNS was not the cause.** A parallel, unrelated incident that
    day (z2r_autobench side, see that repo's own CLAUDE.md) had already
-   broken and then fixed system DNS on NETH-4 — checked and ruled out as
+   broken and then fixed system DNS on Server A — checked and ruled out as
    a factor here; this relay resolves fine.
 2. **Dead CF-fallback fronting domains** (`vendor/config.py`,
    `Flowseal/tg-ws-proxy`'s published domain list) — all 20 resolved to
@@ -124,7 +127,7 @@ invalid.** `iptables -t nat OUTPUT` REDIRECTs *any* locally-originated
 connection to Telegram's CIDR to the relay's own port — the self-loop
 exclusion (`c173450`, see below) only exempts traffic from the `tgrelay`
 user. `curl` run as root has no such exemption, so it was hitting the
-relay's own listening socket on NETH-4, not the real internet — the
+relay's own listening socket on Server A, not the real internet — the
 "ClientHello sent, then silence" was really the relay receiving curl's
 ClientHello locally, correctly classifying it as non-MTProto, and its
 *own* (correctly `tgrelay`-exempted) passthrough re-connect attempt
@@ -151,14 +154,14 @@ is evidently curated by specific IP, not by the whole announced CIDR
 range, and `.220` (obscure, only meaningful to tg-ws-proxy-style relays,
 not something an ordinary direct client would ever try on its own)
 simply never made that list. Doesn't change what happens to be reachable
-from NETH-4 for MTProto (via `mtproxy_relay.py`'s WS-bridge path, always
+from Server A for MTProto (via `mtproxy_relay.py`'s WS-bridge path, always
 fine) — but it does mean `transparent_relay.py`'s plain-TCP passthrough
 for "not MTProto" traffic is structurally dead for most of Telegram's
 real IP space, not just `.99`, independent of any DPI trickery.
 
 **Important: none of this touches why Android sends TLS instead of
 obfuscated2 in the first place.** REDIRECT rewrites the destination in
-netfilter before a packet ever leaves NETH-4, so whether that
+netfilter before a packet ever leaves Server A, so whether that
 destination would ultimately have been reachable is irrelevant to what
 bytes the relay actually receives from the client — the format mystery
 is unaffected by this finding either way. Recorded here purely to fix
@@ -190,7 +193,7 @@ session, not because it resolves the open question.
   pivot below, but relevant if `mtproxy_relay.py` doesn't fully resolve
   it either.
 
-### Also ruled out (checked directly on NETH-4, both clean)
+### Also ruled out (checked directly on Server A, both clean)
 
 - **IPv6 bypassing REDIRECT entirely.** `setup_redirect.sh` only ever
   touches `iptables` (IPv4) — `cidr/fetch_telegram_cidr.sh` fetches an
@@ -199,7 +202,7 @@ session, not because it resolves the open question.
   attempt went out over IPv6, it would never reach either relay and we'd
   never see it. Checked: `ip -6 route show default` is **empty** and
   `curl -6` to a known-good global IPv6 address fails immediately
-  ("Сеть недоступна" / network unreachable) — NETH-4's only IPv6 address
+  ("Сеть недоступна" / network unreachable) — Server A's only IPv6 address
   is a ULA (`fd3f:...`, RFC4193, not internet-routable, likely
   auto-assigned by the home router). No real IPv6 path exists at all, in
   or out — this can't be the gap, on either side.
@@ -212,7 +215,7 @@ session, not because it resolves the open question.
   is exactly what the logs already showed. (Side finding, unrelated:
   re-running `fetch_telegram_cidr.sh` to check for a fresher upstream
   list failed outright — `core.telegram.org` itself doesn't respond over
-  TLS from NETH-4 right now. Not investigated further, the cached list
+  TLS from Server A right now. Not investigated further, the cached list
   was already sufficient for this question.)
 
 Both of these were real, testable hypotheses about the iptables/REDIRECT
@@ -264,7 +267,7 @@ path works for). See README.md "Альтернатива: mtproxy_relay.py" for 
 never let the service auto-generate one on every restart or every
 configured client breaks).
 
-**Deployed and verified on NETH-4** (2026-08-22): port `9443`, secret
+**Deployed and verified on Server A** (2026-08-22): port `9443`, secret
 fixed via `ZTG_MTPROXY_SECRET`/`ZTG_MTPROXY_PORT` in
 `/etc/z2r_autobench/tgrelay.env`, `tg-mtproxy-relay.service` enabled.
 Link configured on the Android device, real MTProto traffic confirmed
@@ -310,7 +313,7 @@ port.
 
 ## REDIRECT rules can be silently wiped by an unrelated service (since 2026-08-23)
 
-- Live incident on NETH-4: `zapret2.service` (separate repo,
+- Live incident on Server A: `zapret2.service` (separate repo,
   `z2r_autobench`) crash-looped three times in ~20s overnight (its own
   bug, see that repo's `CLAUDE.md` — a `/opt/zapret2/lua` symlink hid the
   real core lua library files). Each stop/start cycle ran that project's
@@ -331,7 +334,7 @@ port.
   re-`apply` — `setup_redirect.sh apply` uses `iptables -A` with no
   existence check, so calling it on top of already-present rules
   duplicates every REDIRECT entry instead of being a no-op.
-- Not yet installed on NETH-4 as of this commit — `cp
+- Not yet installed on Server A as of this commit — `cp
   relay/tg-redirect-watchdog.{service,timer} /etc/systemd/system/ &&
   systemctl daemon-reload && systemctl enable --now
   tg-redirect-watchdog.timer`, see README.md "Развёртывание на сервере".

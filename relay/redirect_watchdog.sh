@@ -2,7 +2,7 @@
 # redirect_watchdog.sh -- проверяет, что REDIRECT-правила Zenith-TG в
 # nat OUTPUT ещё на месте, и молча восстанавливает их, если пропали.
 #
-# Живой инцидент 2026-08-23 на NETH-4: краш-луп zapret2.service (три
+# Живой инцидент 2026-08-23 на Server A: краш-луп zapret2.service (три
 # рестарта подряд за ~20с из-за отдельного бага в z2r_autobench, см. его
 # CLAUDE.md) смахнул ВСЕ REDIRECT-правила Zenith-TG в nat OUTPUT побочным
 # эффектом своего init.d-скрипта -- сам relay (transparent_relay.py) при

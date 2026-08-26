@@ -31,7 +31,7 @@ README.md "Прозрачный релей" за инструкцией по RED
 
 ВАЖНО: раз секрета нет -- нет и контроля доступа. Слушать этот процесс
 следует ТОЛЬКО на loopback/внутреннем интерфейсе, куда трафик приходит
-исключительно через iptables REDIRECT с самого NETH-4 (или из
+исключительно через iptables REDIRECT с самого Server A (или из
 VLESS-туннеля, уже терминированного на этой же машине) -- не выставлять
 наружу напрямую.
 """
@@ -77,7 +77,7 @@ ws_blacklist: Set[str] = set()
 dc_fail_until: Dict[str, float] = {}
 ip_fail_until: Dict[str, float] = {}
 
-# Живой случай на NETH-4: браузер (или несколько устройств за одним
+# Живой случай на Server A: браузер (или несколько устройств за одним
 # VLESS-туннелем -- отсюда всё видно как один и тот же клиентский IP,
 # не различить) открыл ~20 000 passthrough-соединений к
 # web.telegram.org МЕНЬШЕ ЧЕМ ЗА МИНУТУ -- похоже на цикл
@@ -93,15 +93,15 @@ PASSTHROUGH_MAX_CONCURRENT = 800
 PASSTHROUGH_IDLE_TIMEOUT = 90.0
 _passthrough_semaphore = asyncio.Semaphore(PASSTHROUGH_MAX_CONCURRENT)
 
-# Живой случай на NETH-4: web.telegram.org (149.154.167.99) заблокирован
+# Живой случай на Server A: web.telegram.org (149.154.167.99) заблокирован
 # на границе сети целиком на уровне SYN (null-route) -- эмпирически
 # подтверждено (curl без REDIRECT: полный таймаут, тот же итог, что и у
 # самого релея при прямом подключении). Никакой --lua-desync=/сплит
 # ClientHello тут не поможет -- манглить нечего, пакет наружу не уходит.
 # Единственный найденный обходной путь: открыть TCP до настоящего IP
-# Telegram НЕ с самого NETH-4, а из сети Cloudflare (свой исходящий
+# Telegram НЕ с самого Server A, а из сети Cloudflare (свой исходящий
 # маршрут, вероятно с ней у Telegram связность чистая) -- см.
-# cf_worker/worker.js, использует `cloudflare:sockets`. NETH-4 достаёт
+# cf_worker/worker.js, использует `cloudflare:sockets`. Server A достаёт
 # до Worker обычным WebSocket через Cloudflare edge (не заблокирован --
 # домен *.workers.dev на облаке Cloudflare, тот же принцип, что и
 # cfproxy_worker_domains у оригинального tg-ws-proxy для MTProto-пути).
@@ -129,7 +129,7 @@ def _decode_direct_client_init(handshake: bytes):
     Telegram -- см. _REAL_DC_IDS) -- НЕ "неверный секрет", секрета тут
     нет в принципе.
 
-    Живой случай на NETH-4, 2026-08-22: без проверки dc_id детектор
+    Живой случай на Server A, 2026-08-22: без проверки dc_id детектор
     массово ловил ложные срабатывания -- 4-байтовый proto_tag это всего
     32 бита, и на достаточном потоке НЕ-MTProto TCP-трафика (тот же
     CIDR, что и у Telegram DC, попадает под REDIRECT) периодически
@@ -239,7 +239,7 @@ async def _passthrough_plain_tcp(reader: asyncio.StreamReader, writer: asyncio.S
             return
 
         try:
-            # Живой случай на NETH-4: curl честно прошёл TCP до
+            # Живой случай на Server A: curl честно прошёл TCP до
             # 149.154.167.99, отправил настоящий TLS ClientHello (SNI
             # web.telegram.org) -- и тут же обрыв, ни байта в ответ. Не
             # IP-блокировка (голый TCP без TLS проходит) -- SNI-based
@@ -312,7 +312,7 @@ async def _passthrough_plain_tcp(reader: asyncio.StreamReader, writer: asyncio.S
 
 async def _connect_via_cf_worker(dst_ip: str, dst_port: int, label: str) -> Optional[RawWebSocket]:
     """Открыть туннель до dst_ip:dst_port через Cloudflare Worker (см.
-    cf_worker/worker.js) вместо прямого TCP с самого NETH-4 -- см.
+    cf_worker/worker.js) вместо прямого TCP с самого Server A -- см.
     комментарий у CF_WORKER_HOST выше. Возвращает None, если фича не
     настроена (пустой host/secret) или сам Worker недоступен/отказал --
     вызывающий код в этом случае просто закрывает клиентское соединение,
@@ -339,7 +339,7 @@ async def _relay_over_cf_worker(reader: asyncio.StreamReader, writer: asyncio.St
     (фреймы вместо голых байт, содержимое кадров не трогаем -- Worker
     сам открывает настоящий TCP до Telegram и просто гоняет байты через
     WebSocket, см. worker.js). Разбиение ClientHello тут не нужно: путь
-    NETH-4->Cloudflare идёт внутри TLS до самого Worker'а, а
+    Server A->Cloudflare идёт внутри TLS до самого Worker'а, а
     Cloudflare->Telegram -- отдельный, необлачный DPI сегмент вообще не
     видит."""
     try:
@@ -582,7 +582,7 @@ async def main_async(host: str, port: int, dc_ip: Dict[int, str]) -> None:
         await server.serve_forever()
 
 
-# Живой случай на NETH-4, 2026-08-22: только DC 2/4 имели прямой быстрый
+# Живой случай на Server A, 2026-08-22: только DC 2/4 имели прямой быстрый
 # путь по умолчанию -- любой другой DC (клиент попадает на DC по номеру
 # СВОЕГО аккаунта при регистрации, не зависит от платформы/устройства)
 # проваливался в do_fallback -> CF proxy fallback -> все 20 доменов из
