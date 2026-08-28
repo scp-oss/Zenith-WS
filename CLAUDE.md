@@ -20,9 +20,14 @@ cause of *why* `transparent_relay.py`'s no-secret path fails on Android
 is still UNRESOLVED (see the trail below, kept intact for context) —
 **actively being re-opened as of 2026-08-28** (user wants the transparent,
 zero-config WS path itself fixed for Android/Windows, not just the
-secret-based mitigation) — see "SNI/ALPN diagnostic added" near the
-bottom of this section for the concrete next step, not yet run on a live
-server.
+secret-based mitigation). **Leading hypothesis as of the latest test round:
+NOT a client-side TLS-wrapping quirk (a control test through a plain,
+non-parsing exit — "FI VDS" — worked on Android/Windows too, ruling that
+out) — now pointing at incomplete destination-IP coverage in
+`setup_redirect.sh`'s cached CIDR list.** See "follow-up control test —
+supersedes the VPN-heuristic hypothesis" for the full reasoning and the
+two concrete next steps (refresh CIDR list; tcpdump the real destination
+IPs), neither yet run on a live server.
 
 **2026-08-28, confirmed test matrix — narrows the trigger to "via VLESS
 specifically", not "Android/Windows in general":**
@@ -52,6 +57,72 @@ parallel with the SNI capture below (that still doesn't need a new test —
 already deployed, just needs someone to reopen Telegram on Android/
 Windows through the VLESS path with `journalctl -u tg-transparent-relay -f`
 open and paste back what shows up).
+
+**2026-08-28, follow-up control test — supersedes the VPN-heuristic
+hypothesis above:**
+
+```
+ios/mac app     -> VLESS -> 3x-ui (Server A) -> FI VDS (plain exit) -> TG DC   [OK]
+android/win app -> VLESS -> 3x-ui (Server A) -> FI VDS (plain exit) -> TG DC   [OK]
+```
+
+Same VLESS tunnel, same "does this look like a VPN" client-side vantage
+point — only the exit changed (a plain VDS in Finland doing ordinary IP
+forwarding, no protocol parsing at all, instead of
+`transparent_relay.py`). Both platforms now work. This rules out a
+client-side "detects VPN, switches to Fake-TLS" heuristic — if that were
+real, routing through *any* proxy exit (VLESS is still VLESS either way)
+should trigger it identically regardless of what sits at the far end.
+The fault is therefore isolated to `transparent_relay.py`/its REDIRECT
+setup on Server A specifically, not to the Telegram client.
+
+**New leading hypothesis: incomplete destination-IP coverage in
+`setup_redirect.sh`'s REDIRECT rule, not a decode/parsing bug.**
+`cidr/telegram_ipv4.txt` is a *cached* snapshot (`2026-08-17`, 9
+subnets) of `core.telegram.org/resources/cidr.txt`, and REDIRECT only
+catches outbound `:443` to those specific subnets (see
+`relay/setup_redirect.sh`). If Android/Windows's real MTProto attempt
+picks a destination IP outside that cached list — a different backup
+DC, a range added/changed since the snapshot, anything not in those 9
+subnets — it is NEVER caught by REDIRECT at all and goes straight out
+from Server A's own uncensored-relay-less network path, where it hits
+the exact ISP-level DPI block this whole project exists to route
+around, and silently dies. iOS/Mac's attempts apparently land inside
+the covered ranges by luck/platform-specific candidate ordering, so
+they get relayed successfully; Android/Windows's don't. This would
+explain BOTH results at once without needing any client-side protocol
+theory: through FI VDS, it doesn't matter which IP is targeted, because
+*everything* routes out through an uncensored network regardless of
+destination — only `transparent_relay.py`'s narrow, IP-scoped REDIRECT
+cares which specific subnet the connection is headed to.
+
+**Earlier "confirmed real TLS ClientHello" finding does NOT contradict
+this** — that capture only proves what showed up *inside* the redirected
+CIDR range (background HTTPS/CDN traffic sharing the same subnets, per
+the already-documented web.telegram.org-passthrough case); it says
+nothing about connections that never got redirected in the first place,
+since those are invisible to `transparent_relay.py`'s own logs by
+construction. Both mechanisms could coexist; this one is now the
+higher-priority lead specifically because the FI-VDS control test rules
+out the client-heuristic theory outright, while nothing has yet ruled
+this one out.
+
+**Two concrete next steps, neither requiring more guessing:**
+1. Refresh the cached CIDR list — `cd /opt/Zenith-TG/cidr &&
+   ./fetch_telegram_cidr.sh` (earlier attempt on 2026-08-22 failed
+   because `core.telegram.org` didn't respond over TLS from Server A at
+   that moment — worth retrying now) — then `setup_redirect.sh remove`
+   + `apply` to pick up any changed/added subnets, and re-test
+   Android/Windows through the normal VLESS path.
+2. **Decisive test, no code change needed:** a non-invasive `tcpdump` on
+   Server A's outbound interface during a fresh Android/Windows test —
+   `tcpdump -i any -n 'tcp dst port 443'` (or scope to the VLESS/3x-ui
+   process's own traffic) while reopening Telegram — to see the actual
+   destination IP(s) attempted, then diff those against
+   `cidr/telegram_ipv4.txt`. If even one target IP falls outside all 9
+   subnets, this hypothesis is confirmed and the fix is just widening
+   REDIRECT coverage (either a fresher CIDR list, or matching Telegram's
+   full published range instead of the cached subset).
 
 **One open caveat, NOT independently verified:** all confirmed-working
 sessions were captured with the Android device on the same home Wi-Fi as
