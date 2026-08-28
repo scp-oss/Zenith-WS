@@ -12,21 +12,34 @@ crept in here to this codename).
 
 ## Android MTProto investigation (started 2026-08-22)
 
-**Status: mitigated via `mtproxy_relay.py`, deployed and confirmed working
-on Server A** — real MTProto sessions on multiple DCs (DC1/DC2/DC2m/DC4m/
-DC203) closing normally with substantial two-way data (one session moved
-1.2MB down), verified live in `journalctl -u tg-mtproxy-relay`. Root
-cause of *why* `transparent_relay.py`'s no-secret path fails on Android
-is still UNRESOLVED (see the trail below, kept intact for context) —
-**actively being re-opened as of 2026-08-28** (user wants the transparent,
-zero-config WS path itself fixed for Android/Windows, not just the
-secret-based mitigation). **Leading hypothesis as of the latest test round:
-NOT a client-side TLS-wrapping quirk (a control test through a plain,
-non-parsing exit — "FI VDS" — worked on Android/Windows too, ruling that
-out) — the follow-up "incomplete CIDR coverage" hypothesis was then
-RULED OUT too (a fresh fetch of Telegram's official list matched the
-cached one byte-for-byte — nothing missing). What the actual live
-re-test surfaced instead: the rejected handshakes in that run were NOT
+**Status: ROOT CAUSE FOUND 2026-08-28, fix shipped, NOT YET LIVE-VERIFIED.**
+`_decode_direct_client_init()` was hard-rejecting genuine client
+`obfuscated2` packets from Android/Windows because their `dc_id` field
+didn't fall in Telegram's real `1-5` numbering — proven, not guessed
+(all 8 captured samples decode to a valid `proto_tag`, `(3/2^32)^8≈6e-74`
+odds of that being chance). Fixed: out-of-range `dc_id` no longer
+rejects the packet, just uses a fallback DC for the WS `Host:` header
+(routing doesn't depend on it — every DC goes through the same
+`149.154.167.220` gateway). See "THE ARTIFACT CAME BACK" below for the
+full reasoning. **Next action: pull + restart on Server A, re-test
+Android/Windows through the normal VLESS path, confirm real two-way
+data flows instead of another instant-close or new failure mode.**
+
+`mtproxy_relay.py` (secret-based, separate service, deployed and
+confirmed working on Server A — real MTProto sessions on multiple DCs
+DC1/DC2/DC2m/DC4m/DC203 closing normally with substantial two-way data,
+one session moved 1.2MB down, verified live in `journalctl -u
+tg-mtproxy-relay`) remains available as a fallback mitigation regardless
+of how the fix above verifies. Rest of this section is the historical
+trail, kept intact for context — **superseded by the finding above, but
+the earlier disproven hypotheses are worth reading** so they don't get
+re-investigated from scratch: NOT a client-side TLS-wrapping quirk (a
+control test through a plain, non-parsing exit — "FI VDS" — worked on
+Android/Windows too, ruling that out) — the follow-up "incomplete CIDR
+coverage" hypothesis was then RULED OUT too (a fresh fetch of Telegram's
+official list matched the cached one byte-for-byte — nothing missing).
+What the actual live re-test surfaced instead: the rejected handshakes
+in that particular run were NOT
 TLS-shaped at all (no accompanying SNI log), a third category distinct
 from both `obfuscated2` and the original TLS-ClientHello finding — but
 the old diagnostic only hex-dumped 16 bytes at `DEBUG` for exactly this
@@ -172,6 +185,61 @@ the real next artifact needed:**
    plain/non-obfuscated MTProto's `abridged`/`intermediate` framing,
    which `_decode_direct_client_init()` was never built to recognize at
    all — see its docstring, it only implements the obfuscated2 scheme).
+
+**2026-08-28, THE ARTIFACT CAME BACK — root cause found and fixed
+(pending live re-verification):** the re-test produced 8 fresh 64-byte
+hex dumps. Ran all 8 through `_decode_direct_client_init()`'s own
+formula by hand: **all 8 out of 8 decode to a valid, recognized
+`proto_tag`** (`ef ef ef ef` = ABRIDGED, every single time). The odds of
+that happening by pure chance on genuinely random bytes are `(3/2^32)^8
+≈ 6e-74` — not "unlikely," mathematically impossible for independent
+random data. These are real client `obfuscated2` packets. The ONLY
+thing that made `_decode_direct_client_init()` reject them was the
+`dc_id` field (bytes 60-62 of the decrypted tail): across all 8 samples
+it came out as an apparently-uniform-random 16-bit value (12965, 17956,
+11312, 3455, 24624, 18029, 19685, and one negative/media-flagged
+-31114) — nothing resembling Telegram's real `1-5` DC numbering that
+`prober/proto.py`'s own reference encoder assumes. **This is NOT the
+same false-positive mechanism as the 2026-08-22 incident** (that one
+involved genuine, *structured* TLS ClientHello bytes, where repeated/
+patterned input could plausibly bias a self-referential AES-CTR decode
+far more than true randomness would — these 8 samples show no visible
+structure at all, consistent with intentionally-random `obfuscated2`
+padding, not TLS). Conclusion: Android/Windows's real client embeds
+*something* other than a `1-5` DC index in that field — semantics not
+identified, but irrelevant to fixing this, because **the relay already
+knows the real destination DC via `_get_original_dst()`/REDIRECT
+regardless of what the client's own field says**, and literally every
+`dc` 1-5 routes to the identical `149.154.167.220` WS gateway anyway
+(see `DEFAULT_DC_IP`) — the field only ever picked which `Host:` domain
+string to present during the WS upgrade.
+
+**Fix shipped in this commit:** `_decode_direct_client_init()` no
+longer hard-rejects on an out-of-range `dc_id` — only an unrecognized
+`proto_tag` is still a real rejection (kept, since that check alone is
+already a ~1-in-1.4-billion-per-packet filter, plenty reliable on its
+own). An out-of-range `dc_id` now returns `dc_reliable=False` and a
+substitute `_FALLBACK_DC=2` for the WS `Host:` domain, and the
+connection is relayed normally instead of falling into
+`_passthrough_plain_tcp` (which was *structurally* doomed anyway — see
+the SYN-blackhole findings throughout this file). Covered by
+`tests/test_decode_direct_client_init.py` (valid dc still marked
+reliable; a Telegram-out-of-range dc — reproducing the exact live
+symptom via `build_obfuscated_init(12965, ...)` — now relays with the
+fallback instead of returning `None`; genuinely unrecognized `proto_tag`
+still correctly rejected) plus the existing `test_transparent_relay_e2e.py`
+(real network round-trip against `149.154.167.220`, confirms the
+already-reliable path is untouched).
+
+**Not yet verified live:** this has NOT been confirmed to fix the
+actual Android/Windows "stuck on Connecting" symptom end-to-end — only
+that it should stop misrouting these specific packets into a doomed
+fallback. Next step: `git pull` + restart `tg-transparent-relay` on
+Server A, re-test Android/Windows through the normal VLESS path, and
+check for `[label] прямой клиент: proto=... dc_id клиента вне диапазона
+-- релею с DC2 по умолчанию` lines followed by either a normal WS
+session (ideally with substantial two-way byte counts, not another
+instant close) or a new, different failure mode worth capturing.
 
 **One open caveat, NOT independently verified:** all confirmed-working
 sessions were captured with the Android device on the same home Wi-Fi as

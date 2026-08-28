@@ -118,28 +118,53 @@ CF_WORKER_TIMEOUT = 8.0
 _REAL_DC_IDS = frozenset(range(1, 6)) | frozenset(range(10001, 10006))
 
 
+# Используется как Host-домен для WS-моста, когда декодированный dc_id
+# не входит в _REAL_DC_IDS (см. _decode_direct_client_init) -- ВСЕ DC
+# 1-5 всё равно идут на один и тот же 149.154.167.220 (см. DEFAULT_DC_IP
+# ниже), так что неверный номер тут влияет только на то, какой Host
+# отправится при апгрейде до WS, а не на то, куда реально уйдёт TCP.
+_FALLBACK_DC = 2
+
+
 def _decode_direct_client_init(handshake: bytes):
     """Декодирует 64-байтный init КАК НАСТОЯЩИЙ прямой клиент -- ключ
     сырой (без SHA256+secret), позиции те же, что у
     `prober/proto.py::build_obfuscated_init` (независимо сверено с
     оригиналом при разборе -- см. докстринг файла). Возвращает
-    (dc_id, is_media, proto_tag, client_dec_prekey_iv) или None, если
-    пакет не похож на валидный obfuscated2 init (proto_tag не
-    распознан, ИЛИ тег распознан, но dc_id вне реального диапазона
-    Telegram -- см. _REAL_DC_IDS) -- НЕ "неверный секрет", секрета тут
-    нет в принципе.
+    (dc_id, is_media, proto_tag, client_dec_prekey_iv, dc_reliable) или
+    None, если proto_tag вообще не распознан -- НЕ "неверный секрет",
+    секрета тут нет в принципе. `dc_reliable=False` означает: тег
+    распознан (это MTProto), но dc_id вне реального диапазона Telegram
+    (см. _REAL_DC_IDS) -- в этом случае dc_id уже заменён на
+    _FALLBACK_DC, вызывающий код всё равно должен релеить пакет, просто
+    знает, что Host-домен для WS выбран наугад.
 
-    Живой случай на Server A, 2026-08-22: без проверки dc_id детектор
-    массово ловил ложные срабатывания -- 4-байтовый proto_tag это всего
-    32 бита, и на достаточном потоке НЕ-MTProto TCP-трафика (тот же
-    CIDR, что и у Telegram DC, попадает под REDIRECT) периодически
-    случайно совпадает с одним из 3 известных тегов после AES-CTR по
-    ПРОИЗВОЛЬНОМУ ключу из первых байт пакета -- сам факт совпадения
-    тега НЕ гарантирует, что это настоящий MTProto. Наблюдалось
-    массово именно на Android (десятки "прямой клиент: DC16712" и
-    подобных абсурдных номеров за секунды после переоткрытия
-    приложения) -- отсюда и путалось с "не работает на Android", хотя
-    настоящая проблема тут, в самом детекторе, а не в устройстве."""
+    Живой случай на Server A, 2026-08-22: proto_tag совпадал у потока
+    НАСТОЯЩИХ TLS ClientHello (см. CLAUDE.md 'Android MTProto
+    investigation', раздел 'The actual finding') -- там это была
+    структурированная (не случайная) входная последовательность байт;
+    предположительно именно повторяющаяся структура TLS-байт (не
+    независимая случайность) и объясняла "десятки ложных срабатываний
+    за секунды" -- не доказано строго, но точно НЕ тот же случай, что
+    ниже. Раньше это лечили жёстким
+    отбросом по диапазону dc_id -- но живой случай 2026-08-28 показал
+    ДРУГОЙ паттерн: НЕ-TLS хендшейки (нет 0x16-префикса, никакой видимой
+    структуры), у которых proto_tag ВСЕГДА совпадает с одним из 3
+    известных тегов (проверено на 8/8 пойманных пакетах -- вероятность
+    случайного совпадения такого тега 8 раз подряд ~6e-74, то есть
+    практически невозможна для истинно случайного ввода) при том, что
+    dc_id выглядит равномерно случайным по всему 16-битному диапазону.
+    Это не тот же механизм ложных срабатываний, что в TLS-случае -- это
+    почти наверняка настоящие клиентские obfuscated2-пакеты (Android/
+    Windows), чьё поле dc_id имеет какую-то другую семантику, отличную
+    от простого "номер DC 1-5", которую здесь предполагает эталонная
+    реализация (prober/proto.py). Жёсткий отброс по диапазону раньше
+    отбрасывал именно эти сессии как "не MTProto" и ронял их в
+    passthrough, который упирается в SYN-блокировку соответствующих
+    IP -- отсюда и "работает на iOS/Mac, не работает на Android/
+    Windows". Сохраняем отброс ТОЛЬКО для случая, когда proto_tag вообще
+    не распознан -- дальше решает вызывающий код (сейчас: релеим с
+    _FALLBACK_DC, логируем ненадёжность отдельно)."""
     dec_prekey_and_iv = handshake[SKIP_LEN:SKIP_LEN + PREKEY_LEN + IV_LEN]
     dec_key = dec_prekey_and_iv[:PREKEY_LEN]
     dec_iv = dec_prekey_and_iv[PREKEY_LEN:]
@@ -153,10 +178,11 @@ def _decode_direct_client_init(handshake: bytes):
 
     dc_idx = int.from_bytes(decrypted[DC_IDX_POS:DC_IDX_POS + 2], 'little', signed=True)
     dc_id = abs(dc_idx)
-    if dc_id not in _REAL_DC_IDS:
-        return None
     is_media = dc_idx < 0
-    return dc_id, is_media, proto_tag, dec_prekey_and_iv
+    dc_reliable = dc_id in _REAL_DC_IDS
+    if not dc_reliable:
+        dc_id = _FALLBACK_DC
+    return dc_id, is_media, proto_tag, dec_prekey_and_iv, dc_reliable
 
 
 _TLS_EXT_SERVER_NAME = 0x0000
@@ -567,7 +593,7 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             await _passthrough_plain_tcp(reader, writer, full, label)
             return
 
-        dc, is_media, proto_tag, client_dec_prekey_iv = result
+        dc, is_media, proto_tag, client_dec_prekey_iv, dc_reliable = result
 
         is_test_dc = proxy_config.force_test_dc or dc >= 10000
         if dc >= 10000:
@@ -582,8 +608,17 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             proto_int = PROTO_PADDED_INTERMEDIATE_INT
 
         dc_idx = -dc if is_media else dc
-        log.info("[%s] прямой клиент: DC%d%s proto=0x%08X (без секрета)",
-                  label, dc, ' media' if is_media else '', proto_int)
+        if dc_reliable:
+            log.info("[%s] прямой клиент: DC%d%s proto=0x%08X (без секрета)",
+                      label, dc, ' media' if is_media else '', proto_int)
+        else:
+            # См. _decode_direct_client_init() докстринг -- proto_tag
+            # распознан надёжно (не может совпасть случайно), но dc_id
+            # клиента вне ожидаемого диапазона -- релеим всё равно,
+            # используя _FALLBACK_DC только для выбора Host-домена WS.
+            log.info("[%s] прямой клиент: proto=0x%08X (без секрета), dc_id клиента вне "
+                      "диапазона -- релею с DC%d по умолчанию (см. CLAUDE.md "
+                      "'Android MTProto investigation')", label, proto_int, dc)
 
         relay_init = build_obfuscated_init(dc_idx, proto_tag)
         ctx = _build_crypto_ctx_direct(client_dec_prekey_iv, relay_init)
