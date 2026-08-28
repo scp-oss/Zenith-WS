@@ -24,6 +24,35 @@ secret-based mitigation) — see "SNI/ALPN diagnostic added" near the
 bottom of this section for the concrete next step, not yet run on a live
 server.
 
+**2026-08-28, confirmed test matrix — narrows the trigger to "via VLESS
+specifically", not "Android/Windows in general":**
+
+```
+via VLESS:    ios/mac app -> VLESS -> 3x-ui (Server A) -> transparent_relay.py -> TG DC   [OK]
+              android/win app -> VLESS -> 3x-ui (Server A) -> transparent_relay.py -> TG DC [FAILS]
+
+via MTProxy:  ios/mac app -> mtproxy_relay.py (Server A) -> TG DC   [OK]
+              android/win app -> mtproxy_relay.py (Server A) -> TG DC [OK]
+```
+
+Android/Windows Telegram DOES speak correct secret-based MTProto
+perfectly fine when connecting directly to `mtproxy_relay.py` (no VLESS
+involved at all) — so this is **not** "Android/Windows can't do
+obfuscated2/MTProto," full stop, as the earlier framing implied. The
+failure is specific to the combination of (Android or Windows) **+**
+routed through VLESS. Sharpens the leading hypothesis from "Android
+auto-wraps in Fake-TLS" to something more specific: Telegram's
+Android/Windows clients most likely have a network heuristic that
+detects "this looks like a VPN/proxy tunnel" (something iOS/macOS's
+Telegram either lacks or doesn't trigger the same way) and voluntarily
+switches to a TLS-camouflaged transport when it fires — worth checking
+whether this correlates with any client-side "proxy detection" or "use
+proxy for calls" style setting exposed in Telegram's own settings, in
+parallel with the SNI capture below (that still doesn't need a new test —
+already deployed, just needs someone to reopen Telegram on Android/
+Windows through the VLESS path with `journalctl -u tg-transparent-relay -f`
+open and paste back what shows up).
+
 **One open caveat, NOT independently verified:** all confirmed-working
 sessions were captured with the Android device on the same home Wi-Fi as
 Server A (source IP `192.168.0.24`, a LAN peer address — NOT `192.168.0.40`,
