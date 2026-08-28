@@ -550,9 +550,20 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                     log.info("[%s] TLS ClientHello вместо MTProto -- SNI=%s ALPN=%s",
                               label, info['sni'] or '-', info['alpn'] or '-')
                 else:
-                    log.debug("[%s] non-MTProto handshake head: %s", label, handshake[:16].hex())
+                    log.info("[%s] non-MTProto handshake (0x16-prefixed, но не разобрался как "
+                             "ClientHello), первые 64 байта: %s", label, handshake[:64].hex())
             else:
-                log.debug("[%s] non-MTProto handshake head: %s", label, handshake[:16].hex())
+                # Живое расследование Android/Windows -- поднято до INFO
+                # (было debug): без этого не видно вообще ничего для
+                # НЕ-TLS-хендшейков, а именно они и оказались реальной
+                # находкой 2026-08-28 (см. CLAUDE.md) -- SYN-блокировка
+                # на passthrough к легитимным IP Telegram (149.154.166.111/
+                # 149.154.167.50) уводила внимание от того, что байты,
+                # которые релей ПОЛУЧИЛ от клиента, вообще не 0x16-
+                # префиксные в этих случаях, и что они собой представляют,
+                # было не видно -- 16 байт мало, берём все прочитанные 64.
+                log.info("[%s] non-MTProto handshake (не TLS), первые 64 байта: %s",
+                         label, handshake[:64].hex())
             await _passthrough_plain_tcp(reader, writer, full, label)
             return
 

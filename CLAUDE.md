@@ -23,11 +23,17 @@ zero-config WS path itself fixed for Android/Windows, not just the
 secret-based mitigation). **Leading hypothesis as of the latest test round:
 NOT a client-side TLS-wrapping quirk (a control test through a plain,
 non-parsing exit — "FI VDS" — worked on Android/Windows too, ruling that
-out) — now pointing at incomplete destination-IP coverage in
-`setup_redirect.sh`'s cached CIDR list.** See "follow-up control test —
-supersedes the VPN-heuristic hypothesis" for the full reasoning and the
-two concrete next steps (refresh CIDR list; tcpdump the real destination
-IPs), neither yet run on a live server.
+out) — the follow-up "incomplete CIDR coverage" hypothesis was then
+RULED OUT too (a fresh fetch of Telegram's official list matched the
+cached one byte-for-byte — nothing missing). What the actual live
+re-test surfaced instead: the rejected handshakes in that run were NOT
+TLS-shaped at all (no accompanying SNI log), a third category distinct
+from both `obfuscated2` and the original TLS-ClientHello finding — but
+the old diagnostic only hex-dumped 16 bytes at `DEBUG` for exactly this
+case, so nothing was visible. Fixed: both non-MTProto branches now log
+the first 64 bytes at `INFO`.** See "both steps run" near the bottom of
+this section for the full blow-by-blow and the one remaining missing
+artifact (the actual 64-byte hex dump, not yet captured).
 
 **2026-08-28, confirmed test matrix — narrows the trigger to "via VLESS
 specifically", not "Android/Windows in general":**
@@ -107,22 +113,65 @@ higher-priority lead specifically because the FI-VDS control test rules
 out the client-heuristic theory outright, while nothing has yet ruled
 this one out.
 
-**Two concrete next steps, neither requiring more guessing:**
-1. Refresh the cached CIDR list — `cd /opt/Zenith-TG/cidr &&
-   ./fetch_telegram_cidr.sh` (earlier attempt on 2026-08-22 failed
-   because `core.telegram.org` didn't respond over TLS from Server A at
-   that moment — worth retrying now) — then `setup_redirect.sh remove`
-   + `apply` to pick up any changed/added subnets, and re-test
-   Android/Windows through the normal VLESS path.
-2. **Decisive test, no code change needed:** a non-invasive `tcpdump` on
-   Server A's outbound interface during a fresh Android/Windows test —
-   `tcpdump -i any -n 'tcp dst port 443'` (or scope to the VLESS/3x-ui
-   process's own traffic) while reopening Telegram — to see the actual
-   destination IP(s) attempted, then diff those against
-   `cidr/telegram_ipv4.txt`. If even one target IP falls outside all 9
-   subnets, this hypothesis is confirmed and the fix is just widening
-   REDIRECT coverage (either a fresher CIDR list, or matching Telegram's
-   full published range instead of the cached subset).
+**2026-08-28, both steps run — step 1 ruled OUT, step 2's own tcpdump
+filter was flawed, but the live capture from step 1's re-test surfaced
+the real next artifact needed:**
+
+1. **CIDR refresh: no functional change.** Fetched `cidr.txt` directly
+   from outside Server A (this session's own network access isn't
+   subject to Server A's ISP block) since `fetch_telegram_cidr.sh`
+   itself still fails from Server A (`core.telegram.org` TLS
+   unreachable, same as 2026-08-22). Result: **byte-for-byte the same 9
+   IPv4 subnets** already in `cidr/telegram_ipv4.txt` (2026-08-17
+   snapshot), just reordered — Telegram's officially published range
+   hasn't changed. Ruled out: this isn't a case of a stale/incomplete
+   *official* list. (IPv6 ranges exist in the upstream list but were not
+   added — Server A has no real outbound IPv6 path at all, per "Also
+   ruled out" below, so they're moot here regardless.)
+
+2. **The `tcpdump -i any -n 'tcp dst port 443'` filter was wrong** —
+   `iptables -t nat OUTPUT REDIRECT` rewrites the destination *before*
+   the packet reaches a physical interface, so a client's real MTProto
+   attempt (redirected to `127.0.0.1:8447`) never appears there at all;
+   only traffic *exempt* from REDIRECT (the relay's own `tgrelay`-user
+   passthrough attempts) or traffic *outside* the CIDR match shows up.
+   The actual capture (two runs, ~10:10 and ~10:16) confirmed exactly
+   that: a lot of unrelated `142.251.0.0/16` (Google/QUIC) and
+   `8.8.4.4` (DNS-over-HTTPS) traffic — nothing to do with Telegram —
+   plus the relay's own passthrough SYNs to `149.154.166.111:443` and
+   `149.154.167.50:443`, retransmitted with the same sequence number and
+   growing backoff, no reply ever — i.e. **two more Telegram IPs
+   confirmed SYN-blackholed from Server A**, same class as the
+   already-documented `.99`/`.51`/`.41`/`.222`/`175.54`. Useful
+   confirmation that the passthrough fallback is even more
+   comprehensively doomed than previously catalogued, but doesn't touch
+   the actual open question (why the client's original handshake didn't
+   decode as `obfuscated2` in the first place) — those SYNs are the
+   relay's own second-hop attempt, not the client's original packet.
+
+3. **What the live `journalctl` capture during the SAME re-test DID
+   show, and why it's the real next lead:** the burst of `[label] не
+   MTProto -- прозрачный TCP passthrough к <ip>:443` lines around
+   10:16:09–10:17:09 had **no accompanying `TLS ClientHello` log line**
+   — meaning, unlike the original 2026-08-22 hex-dump capture (which was
+   unambiguously `0x16 0x03...` real TLS), **these particular rejected
+   handshakes are NOT TLS-shaped at all.** Whatever they are, they're a
+   third category, distinct from both `obfuscated2` and Fake-TLS. The
+   old diagnostic only hex-dumped 16 bytes at `DEBUG` level for this
+   non-TLS case, invisible in a normal `journalctl` view — **fixed in
+   the same commit as this note**: both non-MTProto branches in
+   `_handle_client()` now log the first 64 bytes (all of what's already
+   read for the `obfuscated2` check, no extra cost) at `INFO`, not
+   `DEBUG`. This is now the single missing artifact: reproduce once more
+   (`journalctl -u tg-transparent-relay -f`, reopen Telegram on
+   Android/Windows through the normal VLESS path) and paste back the
+   `non-MTProto handshake (не TLS), первые 64 байта: ...` lines — those
+   64 bytes, compared against what `prober/proto.py::build_obfuscated_init`
+   expects, will show exactly which field (if any) is mismatched, or
+   reveal a completely different packet shape (worth checking against
+   plain/non-obfuscated MTProto's `abridged`/`intermediate` framing,
+   which `_decode_direct_client_init()` was never built to recognize at
+   all — see its docstring, it only implements the obfuscated2 scheme).
 
 **One open caveat, NOT independently verified:** all confirmed-working
 sessions were captured with the Android device on the same home Wi-Fi as
