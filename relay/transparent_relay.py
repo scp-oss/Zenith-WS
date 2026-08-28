@@ -159,6 +159,102 @@ def _decode_direct_client_init(handshake: bytes):
     return dc_id, is_media, proto_tag, dec_prekey_and_iv
 
 
+_TLS_EXT_SERVER_NAME = 0x0000
+_TLS_EXT_ALPN = 0x0010
+
+
+def _parse_tls_client_hello(data: bytes) -> Optional[dict]:
+    """Диагностика для расследования Android/Windows (см. CLAUDE.md
+    'Android MTProto investigation') -- вытаскивает SNI/ALPN из
+    хендшейка, который _decode_direct_client_init() УЖЕ отверг как не
+    obfuscated2, но который выглядит как настоящий TLS ClientHello
+    (0x16 0x03...). Ни на что не влияет, кроме что попадает в лог --
+    passthrough всё равно шлёт байты как есть, распознан SNI или нет.
+    Возвращает None на любой некорректный/неполный/укороченный ввод,
+    никогда не бросает исключение наружу (недоверенные внешние байты)."""
+    try:
+        if len(data) < 5 or data[0] != 0x16:
+            return None
+        record_len = struct.unpack('>H', data[3:5])[0]
+        body = data[5:5 + record_len]
+        if len(body) < 4 or body[0] != 0x01:  # handshake type: ClientHello
+            return None
+        hs_len = int.from_bytes(body[1:4], 'big')
+        hs = body[4:4 + hs_len]
+
+        pos = 2 + 32  # client_version(2) + client_random(32)
+        if len(hs) < pos + 1:
+            return None
+        pos += 1 + hs[pos]  # session_id_length + session_id
+        if len(hs) < pos + 2:
+            return None
+        pos += 2 + int.from_bytes(hs[pos:pos + 2], 'big')  # cipher_suites
+        if len(hs) < pos + 1:
+            return None
+        pos += 1 + hs[pos]  # compression_methods
+        if len(hs) < pos + 2:
+            return {'sni': None, 'alpn': None}  # валидный ClientHello без extensions
+
+        ext_total_len = int.from_bytes(hs[pos:pos + 2], 'big')
+        pos += 2
+        extensions = hs[pos:pos + ext_total_len]
+
+        sni = None
+        alpn = []
+        epos = 0
+        while epos + 4 <= len(extensions):
+            ext_type = int.from_bytes(extensions[epos:epos + 2], 'big')
+            ext_len = int.from_bytes(extensions[epos + 2:epos + 4], 'big')
+            ext_data = extensions[epos + 4:epos + 4 + ext_len]
+            epos += 4 + ext_len
+
+            if ext_type == _TLS_EXT_SERVER_NAME and len(ext_data) >= 2:
+                list_len = int.from_bytes(ext_data[0:2], 'big')
+                entries = ext_data[2:2 + list_len]
+                if len(entries) >= 3 and entries[0] == 0:  # name_type: host_name
+                    name_len = int.from_bytes(entries[1:3], 'big')
+                    sni = entries[3:3 + name_len].decode('ascii', errors='replace')
+            elif ext_type == _TLS_EXT_ALPN and len(ext_data) >= 2:
+                list_len = int.from_bytes(ext_data[0:2], 'big')
+                aptr = ext_data[2:2 + list_len]
+                apos = 0
+                while apos < len(aptr):
+                    plen = aptr[apos]
+                    apos += 1
+                    alpn.append(aptr[apos:apos + plen].decode('ascii', errors='replace'))
+                    apos += plen
+
+        return {'sni': sni, 'alpn': alpn or None}
+    except Exception:
+        return None
+
+
+async def _read_more_for_tls_sniff(reader: asyncio.StreamReader, need: int, timeout: float) -> bytes:
+    """Дочитывает недостающие байты TLS-записи, чтобы SNI-парсер выше
+    увидел ПОЛНЫЙ ClientHello -- 64 байта, которые уже прочитаны в
+    _handle_client для обычной obfuscated2-проверки, почти всегда режут
+    настоящий ClientHello (обычно 300-600+ байт) на середине extensions.
+    Best-effort: если клиент не досылает вовремя, просто возвращаем что
+    успели -- passthrough ниже отправит already_read как есть в любом
+    случае, SNI тут не критичен для самой пересылки, только для лога."""
+    chunks = []
+    got = 0
+    deadline = time.monotonic() + timeout
+    while got < need:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            chunk = await asyncio.wait_for(reader.read(need - got), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+        got += len(chunk)
+    return b''.join(chunks)
+
+
 SO_ORIGINAL_DST = 80  # linux/netfilter_ipv4.h -- получить РЕАЛЬНЫЙ адрес
                        # назначения на сокете, перехваченном iptables
                        # REDIRECT (ядро помнит его в conntrack)
@@ -431,13 +527,33 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         result = _decode_direct_client_init(handshake)
         if result is None:
             stats.connections_bad += 1
-            # Временная диагностика (см. --verbose) -- живой разбор
-            # "почему конкретный клиент никогда не распознаётся как
-            # MTProto": первые 16 байт достаточно, чтобы отличить
-            # реальный TLS ClientHello (0x16 0x03...) от чего-то ещё,
-            # не раскрывая весь хендшейк в лог.
-            log.debug("[%s] non-MTProto handshake head: %s", label, handshake[:16].hex())
-            await _passthrough_plain_tcp(reader, writer, handshake, label)
+            full = handshake
+            # Живое расследование Android/Windows (см. CLAUDE.md 'Android
+            # MTProto investigation') -- каждый такой хендшейк на этих
+            # платформах оказывается НАСТОЯЩИМ TLS ClientHello, а не
+            # obfuscated2. Первых 64 байт (уже прочитанных выше для
+            # obfuscated2-проверки) почти всегда не хватает, чтобы дойти
+            # до extensions -- дочитываем остаток TLS-записи и достаём
+            # SNI/ALPN в лог на уровне INFO (не --verbose), это и есть
+            # недостающая улика: какой домен клиент думает, что
+            # маскируется под.
+            if handshake[:1] == b'\x16':
+                try:
+                    rec_total = 5 + struct.unpack('>H', handshake[3:5])[0]
+                except Exception:
+                    rec_total = 0
+                extra_needed = max(0, rec_total - len(handshake))
+                if extra_needed:
+                    full += await _read_more_for_tls_sniff(reader, extra_needed, timeout=2.0)
+                info = _parse_tls_client_hello(full)
+                if info is not None:
+                    log.info("[%s] TLS ClientHello вместо MTProto -- SNI=%s ALPN=%s",
+                              label, info['sni'] or '-', info['alpn'] or '-')
+                else:
+                    log.debug("[%s] non-MTProto handshake head: %s", label, handshake[:16].hex())
+            else:
+                log.debug("[%s] non-MTProto handshake head: %s", label, handshake[:16].hex())
+            await _passthrough_plain_tcp(reader, writer, full, label)
             return
 
         dc, is_media, proto_tag, client_dec_prekey_iv = result

@@ -17,7 +17,12 @@ on Server A** — real MTProto sessions on multiple DCs (DC1/DC2/DC2m/DC4m/
 DC203) closing normally with substantial two-way data (one session moved
 1.2MB down), verified live in `journalctl -u tg-mtproxy-relay`. Root
 cause of *why* `transparent_relay.py`'s no-secret path fails on Android
-is still UNRESOLVED (see the trail below, kept intact for context).
+is still UNRESOLVED (see the trail below, kept intact for context) —
+**actively being re-opened as of 2026-08-28** (user wants the transparent,
+zero-config WS path itself fixed for Android/Windows, not just the
+secret-based mitigation) — see "SNI/ALPN diagnostic added" near the
+bottom of this section for the concrete next step, not yet run on a live
+server.
 
 **One open caveat, NOT independently verified:** all confirmed-working
 sessions were captured with the Android device on the same home Wi-Fi as
@@ -291,6 +296,49 @@ saw `[Errno 24] Too many open files` during a flood of connections. The
 systemd unit has its own higher limit and doesn't hit this; only matters
 for manual `-v` debug runs like this one. Raise with `ulimit -n 65536`
 in the same shell before running if it recurs.)
+
+### 2026-08-28: SNI/ALPN diagnostic added — next concrete lead, not yet run
+
+The hex-dump above only captured the first 16 bytes of each rejected
+handshake — nowhere near far enough into a real ClientHello to reach the
+`server_name` extension (SNI usually sits 60-200+ bytes in, past
+`client_random`/session_id/cipher_suites/compression). Added
+`_parse_tls_client_hello()` + `_read_more_for_tls_sniff()` in
+`relay/transparent_relay.py`: whenever `_decode_direct_client_init()`
+rejects a handshake that starts with `0x16` (TLS), the relay now reads
+the rest of that TLS record (using the record's own declared length,
+already read to be sure — `already_read` fed to `_passthrough_plain_tcp`
+is the FULL buffer including these extra bytes, so passthrough is
+unaffected either way) and logs the decoded SNI/ALPN **at INFO level**
+(no `-v` needed — this is the actual missing signal, not routine debug
+noise). Unit-tested against a hand-built synthetic ClientHello
+(`tests/test_tls_sni_parser.py`, no network needed) — confirms the parser
+correctly extracts SNI+ALPN from a full ClientHello, returns `None`
+(never raises) on a truncated one (e.g. only the first 64 bytes, which is
+exactly the old blind spot) or outright garbage.
+
+**Why this is the right next step, not a guess:** `relay/vendor/
+tg_ws_proxy.py` (the *original*, unmodified upstream MTProxy code this
+project vendors) has an entire branch for exactly this shape of traffic —
+`_read_client_init()`'s `if first_byte[0] == TLS_RECORD_HANDSHAKE and
+masking:` path unwraps a Fake-TLS-wrapped MTProto handshake via
+`fake_tls.py::verify_client_hello()`, which needs to know the *masking
+domain* the client thinks it's talking to (it's baked into how the
+server-side HMAC-over-`client_random` check works). `transparent_relay.py`
+never implemented that branch at all — it only handles the plain
+`obfuscated2` case (no secret, no masking) — so if Android/Windows really
+are auto-wrapping their connection attempt in Fake-TLS (leading
+hypothesis, see above — still unconfirmed), the SNI/ALPN captured here is
+exactly the piece of information needed to go implement that branch
+correctly. Reproduce the same way as the hex-dump above (`git pull` +
+reopen Telegram on Android/Windows), except **the systemd unit's normal
+logs already show this now** (`journalctl -u tg-transparent-relay -f`) —
+no need for the manual foreground `-v` run just for this signal
+specifically (still useful for the raw hex dump if the SNI parse itself
+comes back `None`/unexpected). Next step once this is captured: compare
+the reported SNI against known masking-domain lists (e.g. what
+`fake_tls.py`/`cfproxy_worker_domains` already expect) and decide whether
+implementing the Fake-TLS unwrap branch is warranted.
 
 Reopen Telegram on the Android device while this is running, watch for
 `non-MTProto handshake head: ...` lines. `Ctrl+C` when done, then
