@@ -655,3 +655,74 @@ port.
   this Worker gets their own `<something>.workers.dev` address and needs
   to update `ZTG_CF_WORKER_HOST` accordingly; it is not a fixed, shared
   value across deployments.
+
+## Same fallback extended to WhatsApp (2026-09-01)
+
+- Same failure class, confirmed the same way: `curl` from Server A to
+  `web.whatsapp.com`/`static.whatsapp.net` times out at the TCP layer
+  (SYN null-route), not a DPI/SNI block — the existing passthrough → CF
+  Worker fallback in `transparent_relay.py` needed zero code changes,
+  since it already classifies traffic generically (any non-MTProto TLS
+  goes to passthrough regardless of which REDIRECT rule delivered it).
+- Added `cidr/whatsapp_ipv4.txt` — deliberately just the two prefixes
+  (`157.240.0.0/17`, `31.13.64.0/18`) containing the confirmed-blocked
+  test endpoints, sourced from AS32934's own published RIR records, NOT
+  the full Meta ASN (35 CIDR blocks, 500k+ addresses spanning Facebook/
+  Instagram/Messenger too — unnecessary blast radius through a relay
+  meant for two specific domains). `setup_redirect.sh` gained
+  `--cidr-file` so it can be invoked a second time for this list
+  alongside the existing Telegram call; the self-loop exclusion insert
+  (`-m owner --uid-owner tgrelay -j RETURN`) is now idempotent (checked
+  via `iptables -C` before `-I`) so calling `apply` twice doesn't
+  duplicate it. `worker.js`'s `ALLOWED_CIDRS` extended with the same two
+  prefixes and redeployed (`RELAY_SECRET` untouched by a redeploy — it's
+  a separate Worker secret, not part of the script content).
+- Confirmed working live the same session: `web.whatsapp.com` opened
+  through the VLESS tunnel after `setup_redirect.sh apply --cidr-file
+  ../cidr/whatsapp_ipv4.txt` + `wrangler deploy` + relay restart.
+
+## `cf_worker/deploy.sh` — one-command deploy for a fresh server (2026-09-01)
+
+- Direct ask, worth recording the reasoning: "давай ключи зашьём чтобы
+  нельзя было достать но и работало из коробки" (bake in the keys so
+  they can't be extracted but it works out of the box) — and the
+  follow-up "tg-ws-proxy же как-то смог закоммитить с ключами" (well
+  tg-ws-proxy managed to commit with keys somehow). Both explained and
+  declined as asked, for a reason that doesn't go away with more
+  engineering effort: `cfproxy_worker_domains` are OTHER PEOPLE's
+  deliberately-open, volunteer-run Workers — a shared public pool with
+  nothing to protect. Our `worker.js` runs on the deploying human's OWN
+  Cloudflare account; `RELAY_SECRET` exists specifically to stop a
+  stranger who finds the `*.workers.dev` URL from riding that account's
+  quota for free (and running an open relay is a Cloudflare ToS
+  violation — real account-ban risk). A secret baked into code that the
+  running process must read to function can always be extracted by
+  anyone with the same access the process has — obfuscation adds friction,
+  not a real barrier — and this repo is PUBLIC, so committing a real
+  secret wouldn't even be "hard to extract," it would be instantly
+  published to everyone. Conclusion given to the user: can't ship a
+  shared baked-in secret, CAN automate away every manual step except the
+  one that's inherently irreducible (a Cloudflare API token — no account,
+  nowhere to deploy the Worker at all).
+- `deploy.sh` (new, `cf_worker/`): takes `CLOUDFLARE_API_TOKEN` from the
+  environment (never written to disk by this script), runs `wrangler
+  deploy`, greps the resulting `*.workers.dev` URL out of its output,
+  generates a FRESH `openssl rand -hex 32` secret every run (never
+  reused across servers or across re-runs — regenerating is cheap and
+  each server should have its own), pipes it non-interactively into
+  `wrangler secret put RELAY_SECRET`, idempotently writes/updates
+  `ZTG_CF_WORKER_HOST`/`ZTG_CF_WORKER_SECRET` in `tgrelay.env` (same
+  sed-if-exists-else-append idiom z2r_autobench's `z0r` already uses for
+  `ZENITH_PROFILES` — doesn't clobber `ZTG_MTPROXY_SECRET` or anything
+  else already in that file), then applies both `setup_redirect.sh`
+  calls (Telegram + WhatsApp) and restarts `tg-transparent-relay` if
+  it's installed. `--skip-redirect` for a box where the relay service
+  isn't installed yet or REDIRECT is managed separately; `--env-file`
+  to target something other than the default path.
+- This directly fixes the exact bug from the WhatsApp/Telegram deploy
+  session immediately before it existed: a human manually copying "the
+  same secret you just set" into `tgrelay.env` typed the literal
+  placeholder text instead, and nothing caught it until live traffic was
+  tested — `deploy.sh` never round-trips the secret through a human's
+  clipboard at all, it goes straight from `openssl rand` into both
+  `wrangler secret put`'s stdin and the env file programmatically.
