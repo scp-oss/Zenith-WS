@@ -786,3 +786,41 @@ port.
   needed to reproduce this live to justify it — a well-known, documented
   wrangler env var): `export WRANGLER_SEND_METRICS=false` near the top of
   `deploy.sh`, before the first `wrangler` call.
+
+## WhatsApp native iOS app: "no internet" while WhatsApp Web works fine (2026-09-01, Server A)
+
+- Live incident, found by process of elimination: native Telegram app
+  worked, WhatsApp Web (browser) worked, but the native WhatsApp iOS app
+  reported "no internet connection" outright. A `tcpdump` during app
+  launch showed genuinely no NEW connection attempt to any Meta IP at
+  all in that window — ruled out a REDIRECT/CIDR-coverage gap (which
+  would still show an attempted-and-failed connection). `iptables -t nat
+  -L OUTPUT -n -v` confirmed the `31.13.64.0/18` REDIRECT rule *was*
+  matching real traffic (432 packets) — the direct-TCP-then-eno2 traffic
+  seen in an earlier `tcpdump` was misread at first as "REDIRECT not
+  applying" but was actually just the relay's OWN second-hop passthrough
+  attempt (exempted from REDIRECT via the `uid-owner wsrelay` rule, by
+  design) — same false-lead shape as the historical Android/Windows
+  tcpdump-filter mistake documented elsewhere in this file.
+- Real cause: `_passthrough_plain_tcp`'s direct-TCP attempt to an
+  already-known SYN-blackholed IP (`149.154.160.0/20`/
+  `157.240.0.0/17`/`31.13.64.0/18`, see the SYN-null-route finding
+  above) is *guaranteed* to fail — no response ever arrives — but the
+  code still waited a fixed 8s before giving up and switching to the
+  Cloudflare Worker fallback. `journalctl` confirmed this ~8s gap
+  between `TLS ClientHello` and `passthrough не удался` on every new
+  connection. The native Telegram client apparently tolerates this
+  silently; WhatsApp's iOS app does not — it decides "no internet"
+  faster than the relay can reach its own working fallback path, even
+  though that fallback path is completely functional once reached.
+- Fixed: extracted the magic `timeout=8` into a named
+  `PASSTHROUGH_DIRECT_TIMEOUT = 3.0` constant and lowered it to 3
+  seconds — a real, reachable TCP handshake essentially never takes
+  longer than 1-2s even to a distant server, so this shouldn't
+  false-fail anything genuinely working, while cutting the wasted wait
+  before CF Worker fallback on confirmed-blackholed ranges by more than
+  half. **Not yet confirmed live on the phone** — needs re-testing
+  after this reaches Server A (`git pull` inside the relay checkout,
+  `systemctl restart ws-transparent-relay`) to see whether 3s is short
+  enough to fit inside WhatsApp iOS's own connectivity-check patience,
+  or whether it needs to go lower still.

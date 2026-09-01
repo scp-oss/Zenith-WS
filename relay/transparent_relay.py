@@ -111,6 +111,19 @@ CF_WORKER_HOST = os.environ.get('ZWS_CF_WORKER_HOST', '')
 CF_WORKER_SECRET = os.environ.get('ZWS_CF_WORKER_SECRET', '')
 CF_WORKER_TIMEOUT = 8.0
 
+# Живой случай 2026-09-01 (Server A, WhatsApp iOS): прямая TCP-попытка
+# ждала полные 8с (см. PASSTHROUGH_DIRECT_TIMEOUT ниже) прежде чем
+# переключиться на CF Worker fallback -- для адресов из уже подтверждённо
+# SYN-заблокированных диапазонов (см. блок выше) эта попытка ГАРАНТИРОВАННО
+# провалится, ответа не будет никогда, так что 8с -- чистые потери
+# времени на каждое новое соединение. Telegram-клиент это молча
+# перетерпливает, а нативное приложение WhatsApp на iOS -- нет: оно
+# показывает "нет сети" раньше, чем relay успевает дойти до рабочего
+# fallback-пути. Сокращено до 3с -- реальный работающий TCP-хендшейк
+# почти никогда не занимает больше 1-2с даже до дальнего сервера, так что
+# это не должно ложно обрубать действительно доступные адреса.
+PASSTHROUGH_DIRECT_TIMEOUT = 3.0
+
 
 # Единственные DC, которые реально существуют у Telegram -- 1-5, плюс
 # те же номера +10000 для тестовой среды (см. is_test_dc в
@@ -341,7 +354,7 @@ async def _passthrough_plain_tcp(reader: asyncio.StreamReader, writer: asyncio.S
 
         try:
             up_reader, up_writer = await asyncio.wait_for(
-                asyncio.open_connection(dst_ip, dst_port), timeout=8)
+                asyncio.open_connection(dst_ip, dst_port), timeout=PASSTHROUGH_DIRECT_TIMEOUT)
         except Exception as exc:
             log.warning("[%s] passthrough к %s:%d не удался: %s", label, dst_ip, dst_port, exc)
             ws = await _connect_via_cf_worker(dst_ip, dst_port, label)
