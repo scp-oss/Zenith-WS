@@ -726,3 +726,33 @@ port.
   tested — `deploy.sh` never round-trips the secret through a human's
   clipboard at all, it goes straight from `openssl rand` into both
   `wrangler secret put`'s stdin and the env file programmatically.
+
+## `CLOUDFLARE_API_TOKEN` caching, and why not Google Drive (2026-09-01)
+
+- Direct follow-up ask: "почему апи токен не можем зашить в код деплоя
+  мб пусть он в тхт лежит в гугл диске" (why can't we bake the API token
+  into the deploy code, maybe keep it as a .txt on Google Drive) —
+  wanting to get rid of typing it in even the first time per server.
+  Declined the Drive idea specifically (not just "secrets in general"):
+  for `deploy.sh` to read it from there automatically, `deploy.sh`
+  itself would need ITS OWN credential to access Drive — that doesn't
+  remove a secret from the picture, it adds a second one on top and
+  moves the trust boundary to whatever sharing setting that Drive file
+  has. A shareable link readable by anything with the URL has strictly
+  worse guarantees than Cloudflare's own token panel (no access log, no
+  revocation UI tied to actual usage, easy to mis-share broader than
+  intended) — this is the same class of mistake as committing a secret
+  to the repo, just moved one hop away.
+- What actually ships: `deploy.sh` now caches `CLOUDFLARE_API_TOKEN`
+  itself into `tgrelay.env` (`chmod 600`) right after a deploy actually
+  succeeds (inside the `set -e` path — a failed deploy never caches a
+  token that might be bad/wrong-scoped). Every subsequent run on THAT
+  SAME server — reading env-var first, falling back to
+  `grep '^CLOUDFLARE_API_TOKEN=' "$ENV_FILE"` (deliberately not `source`-ing
+  the whole file — it can carry other vars not meant to be executed) —
+  picks it up with zero prompts. `z0r`'s `tgrelay_setup_cf_worker()`
+  mirrors the same cache check before it even decides whether to prompt,
+  so the interactive question genuinely only ever appears once per
+  server, not once per `deploy.sh` invocation. A genuinely new/different
+  server still needs the human to type it in that one time — inherent to
+  needing a Cloudflare account at all, no software fix removes that.

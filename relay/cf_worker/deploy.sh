@@ -21,6 +21,26 @@
 #   export CLOUDFLARE_API_TOKEN=...   # шаблон "Edit Cloudflare Workers"
 #   sudo -E ./deploy.sh
 #
+# ...но только В ПЕРВЫЙ раз на конкретном сервере. После успешного
+# деплоя токен кэшируется в САМ $ENV_FILE (chmod 600, тот же файл, что
+# уже хранит ZTG_MTPROXY_SECRET/ZTG_CF_WORKER_SECRET -- секреты этого
+# проекта и так живут только там, ничего нового не открываем) -- любой
+# следующий запуск deploy.sh на ЭТОМ ЖЕ сервере подхватывает его сам,
+# без единого вопроса. Разворачиваешь на ДРУГОМ сервере -- там своего
+# кэша ещё нет, там ввод один раз повторится, это неизбежно (без
+# учётки Cloudflare там в принципе некуда деплоить).
+#
+# НЕ храним токен где-либо ЕЩЁ (напр. в облаке типа Google Drive, даже
+# приватно) -- см. README.md "Почему нельзя просто закоммитить готовый
+# секрет": единственный способ деплою прочитать секрет откуда-либо
+# автоматически -- это дать ЕМУ доступ к тому хранилищу, а это просто
+# переносит тот же самый вопрос секретности на СЛЕДУЮЩИЙ уровень (теперь
+# нужен ещё и секрет для доступа к хранилищу) и добавляет менее
+# контролируемую поверхность (публичная ссылка = скачать может кто
+# угодно, у кого есть URL, без журналирования доступа и отзыва, которые
+# у самого Cloudflare для его токенов есть). Локальный файл с правами
+# 600 на конкретной машине, куда токен реально нужен -- меньшая и более
+# понятная поверхность, чем что-либо в облаке.
 # Использование: deploy.sh [--env-file PATH] [--skip-redirect]
 #   --env-file PATH   -- куда писать ZTG_CF_WORKER_HOST/SECRET
 #                        (по умолчанию /etc/z2r_autobench/tgrelay.env,
@@ -55,8 +75,17 @@ command -v wrangler >/dev/null 2>&1 || {
   exit 1
 }
 
+# Если не передан явно -- пробуем взять из кэша (см. комментарий выше
+# про запись в конце скрипта). grep|cut вместо `source "$ENV_FILE"` --
+# файл может содержать чужие для этого скрипта переменные, не хотим
+# случайно исполнить что-то неожиданное из него.
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f "$ENV_FILE" ]; then
+  CLOUDFLARE_API_TOKEN="$(grep '^CLOUDFLARE_API_TOKEN=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+  [ -n "$CLOUDFLARE_API_TOKEN" ] && echo "==> Использую CLOUDFLARE_API_TOKEN из кэша ($ENV_FILE)." >&2
+fi
+
 [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || {
-  echo "CLOUDFLARE_API_TOKEN не задан. Создай токен на" >&2
+  echo "CLOUDFLARE_API_TOKEN не задан и не найден в $ENV_FILE. Создай токен на" >&2
   echo "https://dash.cloudflare.com/profile/api-tokens (шаблон \"Edit Cloudflare" >&2
   echo "Workers\" достаточен), затем: export CLOUDFLARE_API_TOKEN=..." >&2
   exit 1
@@ -85,7 +114,12 @@ printf '%s' "$SECRET" | wrangler secret put RELAY_SECRET >&2
 # Не трогает остальные строки файла (ZTG_MTPROXY_SECRET и т.п.).
 mkdir -p "$(dirname "$ENV_FILE")"
 touch "$ENV_FILE"
-for kv in "ZTG_CF_WORKER_HOST=$WORKER_HOST" "ZTG_CF_WORKER_SECRET=$SECRET"; do
+chmod 600 "$ENV_FILE"
+# CLOUDFLARE_API_TOKEN кэшируется тут же ТОЛЬКО после успешного
+# деплоя+secret put выше -- если что-то из этого упало (see errexit),
+# до сюда исполнение не доходит, кэш не запишется с непроверенным
+# значением.
+for kv in "ZTG_CF_WORKER_HOST=$WORKER_HOST" "ZTG_CF_WORKER_SECRET=$SECRET" "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN"; do
   key="${kv%%=*}"
   if grep -q "^${key}=" "$ENV_FILE"; then
     sed -i "s#^${key}=.*#${kv}#" "$ENV_FILE"
@@ -93,7 +127,7 @@ for kv in "ZTG_CF_WORKER_HOST=$WORKER_HOST" "ZTG_CF_WORKER_SECRET=$SECRET"; do
     echo "$kv" >> "$ENV_FILE"
   fi
 done
-echo "==> Записано в $ENV_FILE" >&2
+echo "==> Записано в $ENV_FILE (права 600 — там же теперь и CLOUDFLARE_API_TOKEN, для следующего запуска без вопросов)." >&2
 
 if [ "$SKIP_REDIRECT" = "0" ]; then
   echo "==> Применяю REDIRECT (Telegram + WhatsApp)..." >&2
