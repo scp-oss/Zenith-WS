@@ -756,3 +756,33 @@ port.
   server, not once per `deploy.sh` invocation. A genuinely new/different
   server still needs the human to type it in that one time — inherent to
   needing a Cloudflare account at all, no software fix removes that.
+
+## `setup_redirect.sh apply` fully idempotent, `deploy.sh` disables wrangler telemetry prompt (2026-09-01, found on Server B)
+
+- Live audit before a fresh deploy on Server B, prompted by a direct ask
+  to check the whole flow up front instead of hitting one missing piece
+  at a time (that server had already surfaced the wrangler-not-installed
+  and git-dubious-ownership issues in quick succession). Server B's
+  Zenith-TG install already had Telegram REDIRECT applied from its
+  original `tgrelay_enable()` install — `cf_worker/deploy.sh` calls
+  `setup_redirect.sh apply` (Telegram) and `apply --cidr-file
+  .../whatsapp_ipv4.txt` (WhatsApp) unconditionally on every run, but only
+  the self-loop exclusion insert had the `-C` existence check before
+  `-I`/`-A` — the per-CIDR REDIRECT rules themselves had none. Every
+  re-run of `deploy.sh` (including this first one, against an
+  already-REDIRECTed Telegram list) would have duplicated all 9 Telegram
+  rules. Not a routing bug (iptables matches the first hit either way),
+  but an unbounded NAT-table bloat that would repeat on every future
+  redeploy/secret-rotation. Fixed: the REDIRECT loop in `apply` now does
+  the same `-C`-before-`-A` check as the exclusion already did.
+- Separately, `deploy.sh` reads `wrangler deploy`'s output via `$(...)`
+  — on a genuinely first-ever `wrangler` invocation on a box (exactly
+  Server B's situation, `wrangler`/Node were just installed minutes
+  earlier), some versions ask an interactive anonymous-telemetry consent
+  question. Captured via command substitution, that prompt's text would
+  vanish into the captured string instead of reaching the terminal, while
+  stdin stays connected — from the outside this looks exactly like
+  `deploy.sh` hanging for no visible reason. Fixed defensively (not yet
+  needed to reproduce this live to justify it — a well-known, documented
+  wrangler env var): `export WRANGLER_SEND_METRICS=false` near the top of
+  `deploy.sh`, before the first `wrangler` call.
