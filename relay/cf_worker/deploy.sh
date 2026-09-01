@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy.sh -- одна команда вместо ручной пляски с wrangler/секретом,
 # описанной в README.md ниже. Живой повод: первый ручной прогон на
-# Server A (2026-09-01) споткнулся именно на копипасте -- в tgrelay.env
+# Server A (2026-09-01) споткнулся именно на копипасте -- в wsrelay.env
 # буквально попал плейсхолдер "<тот же секрет...>" вместо настоящего
 # значения, и "Cloudflare Worker fallback включён" в логе всё равно
 # печаталось (проверка там -- просто непустая строка, не валидность),
@@ -23,7 +23,7 @@
 #
 # ...но только В ПЕРВЫЙ раз на конкретном сервере. После успешного
 # деплоя токен кэшируется в САМ $ENV_FILE (chmod 600, тот же файл, что
-# уже хранит ZTG_MTPROXY_SECRET/ZTG_CF_WORKER_SECRET -- секреты этого
+# уже хранит ZWS_MTPROXY_SECRET/ZWS_CF_WORKER_SECRET -- секреты этого
 # проекта и так живут только там, ничего нового не открываем) -- любой
 # следующий запуск deploy.sh на ЭТОМ ЖЕ сервере подхватывает его сам,
 # без единого вопроса. Разворачиваешь на ДРУГОМ сервере -- там своего
@@ -42,9 +42,9 @@
 # 600 на конкретной машине, куда токен реально нужен -- меньшая и более
 # понятная поверхность, чем что-либо в облаке.
 # Использование: deploy.sh [--env-file PATH] [--skip-redirect]
-#   --env-file PATH   -- куда писать ZTG_CF_WORKER_HOST/SECRET
-#                        (по умолчанию /etc/z2r_autobench/tgrelay.env,
-#                        тот же файл, что tg-transparent-relay.service
+#   --env-file PATH   -- куда писать ZWS_CF_WORKER_HOST/SECRET
+#                        (по умолчанию /etc/z2r_autobench/wsrelay.env,
+#                        тот же файл, что ws-transparent-relay.service
 #                        уже подключает через EnvironmentFile=-).
 #   --skip-redirect   -- не трогать iptables (только задеплоить воркер
 #                        и прописать env) -- на случай, если REDIRECT
@@ -63,7 +63,7 @@ export WRANGLER_SEND_METRICS=false
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-ENV_FILE=/etc/z2r_autobench/tgrelay.env
+ENV_FILE=/etc/z2r_autobench/wsrelay.env
 SKIP_REDIRECT=0
 
 while [ $# -gt 0 ]; do
@@ -119,7 +119,7 @@ printf '%s' "$SECRET" | wrangler secret put RELAY_SECRET >&2
 
 # Идемпотентная запись в env-файл -- та же sed-или-append схема, что
 # z0r уже использует для ZENITH_PROFILES и т.п. (см. z2r_autobench/z0r).
-# Не трогает остальные строки файла (ZTG_MTPROXY_SECRET и т.п.).
+# Не трогает остальные строки файла (ZWS_MTPROXY_SECRET и т.п.).
 mkdir -p "$(dirname "$ENV_FILE")"
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -127,7 +127,7 @@ chmod 600 "$ENV_FILE"
 # деплоя+secret put выше -- если что-то из этого упало (see errexit),
 # до сюда исполнение не доходит, кэш не запишется с непроверенным
 # значением.
-for kv in "ZTG_CF_WORKER_HOST=$WORKER_HOST" "ZTG_CF_WORKER_SECRET=$SECRET" "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN"; do
+for kv in "ZWS_CF_WORKER_HOST=$WORKER_HOST" "ZWS_CF_WORKER_SECRET=$SECRET" "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN"; do
   key="${kv%%=*}"
   if grep -q "^${key}=" "$ENV_FILE"; then
     sed -i "s#^${key}=.*#${kv}#" "$ENV_FILE"
@@ -143,12 +143,12 @@ if [ "$SKIP_REDIRECT" = "0" ]; then
   "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/whatsapp_ipv4.txt"
 fi
 
-if systemctl list-unit-files tg-transparent-relay.service >/dev/null 2>&1; then
-  echo "==> Перезапускаю tg-transparent-relay..." >&2
-  systemctl restart tg-transparent-relay
-  echo "==> Готово. Проверь: journalctl -u tg-transparent-relay -f" >&2
+if systemctl list-unit-files ws-transparent-relay.service >/dev/null 2>&1; then
+  echo "==> Перезапускаю ws-transparent-relay..." >&2
+  systemctl restart ws-transparent-relay
+  echo "==> Готово. Проверь: journalctl -u ws-transparent-relay -f" >&2
 else
-  echo "==> tg-transparent-relay.service не установлен -- воркер задеплоен и" >&2
+  echo "==> ws-transparent-relay.service не установлен -- воркер задеплоен и" >&2
   echo "    env прописан, но сам релей нужно поставить отдельно (см. README.md" >&2
   echo "    основного репозитория, 'Развёртывание на сервере')." >&2
 fi

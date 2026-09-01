@@ -1,5 +1,5 @@
 [Unit]
-Description=Periodically check Zenith-TG REDIRECT rules are still applied
+Description=Periodically check Zenith-WS REDIRECT rules are still applied
 
 [Timer]
 # Живой инцидент 2026-08-23: правила пропали ночью и никто не заметил до

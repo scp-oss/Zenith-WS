@@ -68,7 +68,7 @@ from vendor.utils import ws_domains  # noqa: E402
 from vendor._aes import Cipher, algorithms, modes  # noqa: E402
 from proto import build_obfuscated_init  # noqa: E402  (собственный код этого репо)
 
-log = logging.getLogger('tg-transparent-relay')
+log = logging.getLogger('ws-transparent-relay')
 
 IP_FAIL_COOLDOWN = 3600.0
 DC_FAIL_COOLDOWN = 60.0
@@ -107,8 +107,8 @@ _passthrough_semaphore = asyncio.Semaphore(PASSTHROUGH_MAX_CONCURRENT)
 # cfproxy_worker_domains у оригинального tg-ws-proxy для MTProto-пути).
 # Опционально: если не настроено (пусто) -- поведение как раньше,
 # passthrough просто не удаётся и разрывается.
-CF_WORKER_HOST = os.environ.get('ZTG_CF_WORKER_HOST', '')
-CF_WORKER_SECRET = os.environ.get('ZTG_CF_WORKER_SECRET', '')
+CF_WORKER_HOST = os.environ.get('ZWS_CF_WORKER_HOST', '')
+CF_WORKER_SECRET = os.environ.get('ZWS_CF_WORKER_SECRET', '')
 CF_WORKER_TIMEOUT = 8.0
 
 
@@ -771,13 +771,13 @@ def main():
                           '149.154.167.220 -- см. комментарий у DEFAULT_DC_IP)')
     ap.add_argument('--cf-worker-host', default=None, metavar='HOST',
                      help='Домен задеплоенного cf_worker/worker.js (например, '
-                          'zenith-tg-relay.<subdomain>.workers.dev) -- fallback для '
+                          'zenith-ws-relay.<subdomain>.workers.dev) -- fallback для '
                           'passthrough-трафика (web.telegram.org и т.п.), когда прямой '
                           'TCP с этой машины заблокирован. По умолчанию берётся из '
-                          'ZTG_CF_WORKER_HOST, пусто = фича выключена.')
+                          'ZWS_CF_WORKER_HOST, пусто = фича выключена.')
     ap.add_argument('--cf-worker-secret', default=None, metavar='SECRET',
                      help='Секрет, заданный в Worker через `wrangler secret put RELAY_SECRET` '
-                          '-- по умолчанию берётся из ZTG_CF_WORKER_SECRET.')
+                          '-- по умолчанию берётся из ZWS_CF_WORKER_SECRET.')
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
 

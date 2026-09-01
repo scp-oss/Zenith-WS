@@ -20,7 +20,7 @@
 # (loopback всегда быстрый и надёжный), хотя реальный IP в этот момент
 # был недоступен -- нашли только сравнив с curl БЕЗ REDIRECT вообще.
 # Исправлено через -m owner --uid-owner (сервис работает под отдельным
-# системным пользователем tgrelay, см. tg-transparent-relay.service) --
+# системным пользователем wsrelay, см. ws-transparent-relay.service) --
 # трафик ОТ этого пользователя пропускается мимо REDIRECT (RETURN),
 # должно стоять ПЕРЕД правилами REDIRECT.
 #
@@ -56,7 +56,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CIDR_FILE="$SCRIPT_DIR/../cidr/telegram_ipv4.txt"
 PORT=8447
-RELAY_USER=tgrelay
+RELAY_USER=wsrelay
 ACTION="${1:-}"
 shift || true
 

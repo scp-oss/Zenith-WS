@@ -1,4 +1,4 @@
-# Zenith-TG
+# Zenith-WS
 
 Прозрачный модуль доступа к Telegram для инфраструктуры z2r_autobench —
 без ручной настройки MTProto-прокси в приложении, без модифицированных
@@ -94,9 +94,9 @@ IP датацентров вместо ожидаемого сырого obfusca
 cd relay
 # первый ручной запуск -- получить секрет и готовую ссылку из лога
 python3 mtproxy_relay.py --host 0.0.0.0 --port 9443
-# дальше зафиксировать тот же секрет в /etc/z2r_autobench/tgrelay.env
-# (ZTG_MTPROXY_SECRET=..., ZTG_MTPROXY_PORT=9443) и поставить как
-# systemd-сервис, см. tg-mtproxy-relay.service
+# дальше зафиксировать тот же секрет в /etc/z2r_autobench/wsrelay.env
+# (ZWS_MTPROXY_SECRET=..., ZWS_MTPROXY_PORT=9443) и поставить как
+# systemd-сервис, см. ws-mtproxy-relay.service
 ```
 
 Слушает на публичном интерфейсе (не `127.0.0.1`, в отличие от
@@ -117,13 +117,13 @@ cidr/
 relay/
   transparent_relay.py    -- прозрачный коннектор (без секрета)
   vendor/                 -- вендоренная relay-машинерия tg-ws-proxy (MIT)
-  tg-transparent-relay.service -- systemd unit
+  ws-transparent-relay.service -- systemd unit
   setup_redirect.sh        -- iptables REDIRECT apply/remove/status
   redirect_watchdog.sh     -- проверяет и восстанавливает REDIRECT-правила,
                              если их смахнёт посторонний сервис
-  tg-redirect-watchdog.service/.timer -- systemd unit + таймер (каждые 5 мин)
+  ws-redirect-watchdog.service/.timer -- systemd unit + таймер (каждые 5 мин)
   mtproxy_relay.py         -- настоящий MTProxy с секретом (альтернатива)
-  tg-mtproxy-relay.service -- systemd unit для mtproxy_relay.py
+  ws-mtproxy-relay.service -- systemd unit для mtproxy_relay.py
   cf_worker/               -- опциональный fallback для passthrough
                              (web.telegram.org и т.п.) через Cloudflare
                              Worker -- см. cf_worker/README.md
@@ -157,12 +157,12 @@ bash cidr/fetch_telegram_cidr.sh
 ## Развёртывание на сервере
 
 ```bash
-useradd --system --no-create-home --shell /usr/sbin/nologin tgrelay
-chown -R tgrelay:tgrelay /opt/Zenith-TG
+useradd --system --no-create-home --shell /usr/sbin/nologin wsrelay
+chown -R wsrelay:wsrelay /opt/Zenith-WS
 
-cp relay/tg-transparent-relay.service /etc/systemd/system/
+cp relay/ws-transparent-relay.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now tg-transparent-relay
+systemctl enable --now ws-transparent-relay
 
 # Прозрачный REDIRECT (нужен root, меняет iptables)
 sudo bash relay/setup_redirect.sh apply
@@ -175,12 +175,12 @@ sudo bash relay/setup_redirect.sh status   # проверить, что прав
 # "Clearing iptables"). Сам relay при этом продолжает работать штатно и
 # не может это заметить — таймер раз в 5 минут проверяет и молча
 # восстанавливает, если правила пропали целиком.
-cp relay/tg-redirect-watchdog.service relay/tg-redirect-watchdog.timer /etc/systemd/system/
+cp relay/ws-redirect-watchdog.service relay/ws-redirect-watchdog.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now tg-redirect-watchdog.timer
+systemctl enable --now ws-redirect-watchdog.timer
 ```
 
-Откат: `sudo bash relay/setup_redirect.sh remove` + `systemctl disable --now tg-transparent-relay tg-redirect-watchdog.timer`.
+Откат: `sudo bash relay/setup_redirect.sh remove` + `systemctl disable --now ws-transparent-relay ws-redirect-watchdog.timer`.
 
 **Слушать `transparent_relay.py` ТОЛЬКО на `127.0.0.1`** — без секрета
 нет контроля доступа, трафик должен приходить исключительно через
@@ -191,13 +191,13 @@ systemctl enable --now tg-redirect-watchdog.timer
 - **REDIRECT-правила в `nat OUTPUT` может смахнуть побочным эффектом
   совершенно посторонний сервис** — живой случай 2026-08-23 на Server A:
   краш-луп `zapret2.service` (из отдельного репо `z2r_autobench`, три
-  рестарта подряд за ~20с) стёр все правила Zenith-TG в `nat OUTPUT`,
+  рестарта подряд за ~20с) стёр все правила Zenith-WS в `nat OUTPUT`,
   хотя формально разные таблицы/логика — `relay/transparent_relay.py`
   при этом продолжал работать штатно (слушает только `127.0.0.1:8447`,
   ему всё равно, заворачивает ли что-то трафик), просто трафик перестал
   доходить, и телеграм на iOS через VLESS сломался тихо на всю ночь,
   никто не заметил. Митигировано `relay/redirect_watchdog.sh` +
-  `tg-redirect-watchdog.timer` (раз в 5 минут проверяет и молча
+  `ws-redirect-watchdog.timer` (раз в 5 минут проверяет и молча
   восстанавливает, если правил REDIRECT не осталось вообще) — см.
   «Развёртывание на сервере» выше. Не решает первопричину (это не в
   нашей власти — сторонний сервис), только сокращает окно простоя.
@@ -215,7 +215,7 @@ systemctl enable --now tg-redirect-watchdog.timer
   провайдера/сервера блокировка будет именно DPI-сигнатурной, тогда он
   может пригодиться после живой проверки синтаксиса операторов.
 - **`setup_redirect.sh` ОБЯЗАН исключать собственный исходящий трафик
-  relay** (`-m owner --uid-owner tgrelay -j RETURN` перед REDIRECT-
+  relay** (`-m owner --uid-owner wsrelay -j RETURN` перед REDIRECT-
   правилами, уже в скрипте) — без этого relay заворачивает СВОИ ЖЕ
   попытки достучаться до Telegram сам на себя (self-loop через
   localhost). Живой случай на Server A: это давало ложное впечатление
@@ -233,8 +233,8 @@ systemctl enable --now tg-redirect-watchdog.timer
   затрагивает только браузерную версию.
   Опциональный обходной путь: `_passthrough_plain_tcp` умеет уходить
   через Cloudflare Worker (`relay/cf_worker/`, `cloudflare:sockets`),
-  если он задеплоен и настроен через `ZTG_CF_WORKER_HOST`/
-  `ZTG_CF_WORKER_SECRET` — см. `relay/cf_worker/README.md`. Не
+  если он задеплоен и настроен через `ZWS_CF_WORKER_HOST`/
+  `ZWS_CF_WORKER_SECRET` — см. `relay/cf_worker/README.md`. Не
   гарантированное решение (зависит от связности самого Cloudflare с
   этим IP Telegram, не проверено на реальном трафике на момент
   написания) и требует отдельного Cloudflare-аккаунта — без настройки

@@ -23,7 +23,7 @@ WebSocket через Cloudflare edge (не заблокирован — обыч
 
 **Подтверждено живым трафиком 2026-09-01** — задеплоено на Server A,
 `web.telegram.org` открылся полностью через VLESS-туннель. В логе
-`tg-transparent-relay` видно, что прямой TCP к `149.154.167.99` по-прежнему
+`ws-transparent-relay` видно, что прямой TCP к `149.154.167.99` по-прежнему
 падает по таймауту (SYN null-route никуда не делся), а fallback через
 Worker проходит без единой ошибки — значит у Cloudflare действительно
 чистая связность до этого IP, допущение выше подтвердилось не только
@@ -31,7 +31,7 @@ Worker проходит без единой ошибки — значит у Clo
 (`zws2.web.telegram.org`, `kws2.web.telegram.org`,
 `venus.web.telegram.org` — то есть не просто статика, а живые
 сообщения). Первый прогон деплоя споткнулся на человеческой ошибке, не
-на архитектуре — в `tgrelay.env` буквально вписали плейсхолдер
+на архитектуре — в `wsrelay.env` буквально вписали плейсхолдер
 `<тот же секрет...>` вместо настоящего значения из `wrangler secret put`,
 из-за чего Worker отвечал 403 всем запросам; после исправления секрета
 заработало сразу.
@@ -76,7 +76,7 @@ Cloudflare развернуть воркер физически негде.
 ## Быстрый деплой (`deploy.sh`)
 
 Одна команда вместо ручной пляски ниже — сама генерирует свежий
-`RELAY_SECRET`, деплоит воркер, прописывает `tgrelay.env`, применяет
+`RELAY_SECRET`, деплоит воркер, прописывает `wsrelay.env`, применяет
 REDIRECT (Telegram + WhatsApp) и рестартует релей:
 
 ```bash
@@ -88,14 +88,14 @@ sudo -E ./deploy.sh
 
 `sudo -E` обязателен только в ПЕРВЫЙ раз на конкретном сервере — без
 `-E` sudo сбросит `CLOUDFLARE_API_TOKEN` из окружения. После первого
-успешного запуска `deploy.sh` сам кэширует токен в `tgrelay.env`
-(`chmod 600`, тот же файл, что уже хранит `ZTG_MTPROXY_SECRET`/
-`ZTG_CF_WORKER_SECRET`) — все следующие запуски (например, ротация
+успешного запуска `deploy.sh` сам кэширует токен в `wsrelay.env`
+(`chmod 600`, тот же файл, что уже хранит `ZWS_MTPROXY_SECRET`/
+`ZWS_CF_WORKER_SECRET`) — все следующие запуски (например, ротация
 `RELAY_SECRET` или редеплой после правки `worker.js`) подхватывают его
 сами, просто `sudo ./deploy.sh`, без единого вопроса. `--env-file PATH`
-меняет, куда пишется env (по умолчанию `/etc/z2r_autobench/tgrelay.env`);
+меняет, куда пишется env (по умолчанию `/etc/z2r_autobench/wsrelay.env`);
 `--skip-redirect` — не трогать iptables (например, если
-`tg-transparent-relay.service` ещё не установлен вообще).
+`ws-transparent-relay.service` ещё не установлен вообще).
 
 Кэш токена живёт ТОЛЬКО в этом локальном файле на этом сервере — не в
 облаке, даже приватно (см. "Почему нельзя просто закоммитить готовый
@@ -119,9 +119,9 @@ cd relay/cf_worker
 wrangler login          # откроет браузер для авторизации
 
 wrangler deploy          # первый деплой -- создаст воркер по имени
-                          # из wrangler.toml (zenith-tg-relay), выведет
+                          # из wrangler.toml (zenith-ws-relay), выведет
                           # его адрес вида
-                          # https://zenith-tg-relay.<subdomain>.workers.dev
+                          # https://zenith-ws-relay.<subdomain>.workers.dev
 
 wrangler secret put RELAY_SECRET
 # запросит значение интерактивно -- ввести длинную случайную строку,
@@ -131,25 +131,25 @@ wrangler secret put RELAY_SECRET
 ```
 
 После деплоя у вас будет:
-- домен воркера (например, `zenith-tg-relay.<subdomain>.workers.dev`)
+- домен воркера (например, `zenith-ws-relay.<subdomain>.workers.dev`)
 - секрет, который вы сами задали через `wrangler secret put`
 
 ## Подключение к relay
 
-Прописать в `/etc/z2r_autobench/tgrelay.env` на Server A (создать, если
-нет — `tg-transparent-relay.service` уже подключает его как
+Прописать в `/etc/z2r_autobench/wsrelay.env` на Server A (создать, если
+нет — `ws-transparent-relay.service` уже подключает его как
 `EnvironmentFile=-`, см. сам unit-файл):
 
 ```
-ZTG_CF_WORKER_HOST=zenith-tg-relay.<subdomain>.workers.dev
-ZTG_CF_WORKER_SECRET=<тот же секрет, что задали через wrangler secret put>
+ZWS_CF_WORKER_HOST=zenith-ws-relay.<subdomain>.workers.dev
+ZWS_CF_WORKER_SECRET=<тот же секрет, что задали через wrangler secret put>
 ```
 
 ```bash
-systemctl restart tg-transparent-relay
-journalctl -u tg-transparent-relay -f
+systemctl restart ws-transparent-relay
+journalctl -u ws-transparent-relay -f
 # при старте должна появиться строка:
-#   "Cloudflare Worker fallback включён: zenith-tg-relay.<subdomain>.workers.dev"
+#   "Cloudflare Worker fallback включён: zenith-ws-relay.<subdomain>.workers.dev"
 ```
 
 Можно также передать через флаги CLI напрямую (`--cf-worker-host`,
@@ -173,11 +173,11 @@ https://web.telegram.org/
 В логе relay при успешном fallback должна появиться строка вида:
 
 ```
-[<клиент>] прямой TCP к 149.154.167.99:443 не удался -- ушли через Cloudflare Worker zenith-tg-relay.<subdomain>.workers.dev
+[<клиент>] прямой TCP к 149.154.167.99:443 не удался -- ушли через Cloudflare Worker zenith-ws-relay.<subdomain>.workers.dev
 ```
 
 Если вместо этого видно `Cloudflare Worker fallback к ... тоже не
-удался` — либо неверный секрет/домен в `tgrelay.env`, либо у самого
+удался` — либо неверный секрет/домен в `wsrelay.env`, либо у самого
 Cloudflare тоже нет связности до этого IP Telegram (в этом случае
 подход не решает задачу, см. предупреждение выше).
 

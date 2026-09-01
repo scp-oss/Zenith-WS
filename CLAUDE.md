@@ -29,7 +29,7 @@ data flows instead of another instant-close or new failure mode.**
 confirmed working on Server A — real MTProto sessions on multiple DCs
 DC1/DC2/DC2m/DC4m/DC203 closing normally with substantial two-way data,
 one session moved 1.2MB down, verified live in `journalctl -u
-tg-mtproxy-relay`) remains available as a fallback mitigation regardless
+ws-mtproxy-relay`) remains available as a fallback mitigation regardless
 of how the fix above verifies. Rest of this section is the historical
 trail, kept intact for context — **superseded by the finding above, but
 the earlier disproven hypotheses are worth reading** so they don't get
@@ -74,7 +74,7 @@ whether this correlates with any client-side "proxy detection" or "use
 proxy for calls" style setting exposed in Telegram's own settings, in
 parallel with the SNI capture below (that still doesn't need a new test —
 already deployed, just needs someone to reopen Telegram on Android/
-Windows through the VLESS path with `journalctl -u tg-transparent-relay -f`
+Windows through the VLESS path with `journalctl -u ws-transparent-relay -f`
 open and paste back what shows up).
 
 **2026-08-28, follow-up control test — supersedes the VPN-heuristic
@@ -146,7 +146,7 @@ the real next artifact needed:**
    `iptables -t nat OUTPUT REDIRECT` rewrites the destination *before*
    the packet reaches a physical interface, so a client's real MTProto
    attempt (redirected to `127.0.0.1:8447`) never appears there at all;
-   only traffic *exempt* from REDIRECT (the relay's own `tgrelay`-user
+   only traffic *exempt* from REDIRECT (the relay's own `wsrelay`-user
    passthrough attempts) or traffic *outside* the CIDR match shows up.
    The actual capture (two runs, ~10:10 and ~10:16) confirmed exactly
    that: a lot of unrelated `142.251.0.0/16` (Google/QUIC) and
@@ -176,7 +176,7 @@ the real next artifact needed:**
    `_handle_client()` now log the first 64 bytes (all of what's already
    read for the `obfuscated2` check, no extra cost) at `INFO`, not
    `DEBUG`. This is now the single missing artifact: reproduce once more
-   (`journalctl -u tg-transparent-relay -f`, reopen Telegram on
+   (`journalctl -u ws-transparent-relay -f`, reopen Telegram on
    Android/Windows through the normal VLESS path) and paste back the
    `non-MTProto handshake (не TLS), первые 64 байта: ...` lines — those
    64 bytes, compared against what `prober/proto.py::build_obfuscated_init`
@@ -234,7 +234,7 @@ already-reliable path is untouched).
 **Not yet verified live:** this has NOT been confirmed to fix the
 actual Android/Windows "stuck on Connecting" symptom end-to-end — only
 that it should stop misrouting these specific packets into a doomed
-fallback. Next step: `git pull` + restart `tg-transparent-relay` on
+fallback. Next step: `git pull` + restart `ws-transparent-relay` on
 Server A, re-test Android/Windows through the normal VLESS path, and
 check for `[label] прямой клиент: proto=... dc_id клиента вне диапазона
 -- релею с DC2 по умолчанию` lines followed by either a normal WS
@@ -347,16 +347,16 @@ read at the time as a DPI blackhole *after* the handshake starts, not a
 SYN-level block like the already-documented `.99` case. **That test was
 invalid.** `iptables -t nat OUTPUT` REDIRECTs *any* locally-originated
 connection to Telegram's CIDR to the relay's own port — the self-loop
-exclusion (`c173450`, see below) only exempts traffic from the `tgrelay`
+exclusion (`c173450`, see below) only exempts traffic from the `wsrelay`
 user. `curl` run as root has no such exemption, so it was hitting the
 relay's own listening socket on Server A, not the real internet — the
 "ClientHello sent, then silence" was really the relay receiving curl's
 ClientHello locally, correctly classifying it as non-MTProto, and its
-*own* (correctly `tgrelay`-exempted) passthrough re-connect attempt
+*own* (correctly `wsrelay`-exempted) passthrough re-connect attempt
 timing out in the background while curl sat on its side of the loop
 waiting.
 
-**Redone correctly** (`sudo -u tgrelay curl -sv --connect-timeout 4
+**Redone correctly** (`sudo -u wsrelay curl -sv --connect-timeout 4
 https://149.154.167.51:443/`, genuinely bypassing REDIRECT this time):
 plain `Connection timed out` at the TCP layer — no ClientHello is even
 reached. This **is** the same SYN-null-route class as `149.154.167.99`/
@@ -483,15 +483,15 @@ convention as the rest of `vendor/`) as a second, independent service.
 Runs the real secret-based protocol on a public port; `transparent_relay.py`
 is untouched and keeps running for iPhone (or anything else the no-secret
 path works for). See README.md "Альтернатива: mtproxy_relay.py" for setup,
-`tg-mtproxy-relay.service` for the systemd unit (requires
-`ZTG_MTPROXY_SECRET`/`ZTG_MTPROXY_PORT` in `/etc/z2r_autobench/tgrelay.env`
+`ws-mtproxy-relay.service` for the systemd unit (requires
+`ZWS_MTPROXY_SECRET`/`ZWS_MTPROXY_PORT` in `/etc/z2r_autobench/wsrelay.env`
 — generate the secret once with `python3 -c "import os; print(os.urandom(16).hex())"`,
 never let the service auto-generate one on every restart or every
 configured client breaks).
 
 **Deployed and verified on Server A** (2026-08-22): port `9443`, secret
-fixed via `ZTG_MTPROXY_SECRET`/`ZTG_MTPROXY_PORT` in
-`/etc/z2r_autobench/tgrelay.env`, `tg-mtproxy-relay.service` enabled.
+fixed via `ZWS_MTPROXY_SECRET`/`ZWS_MTPROXY_PORT` in
+`/etc/z2r_autobench/wsrelay.env`, `ws-mtproxy-relay.service` enabled.
 Link configured on the Android device, real MTProto traffic confirmed
 flowing (see status note at the top of this section for the one
 remaining unverified caveat — cross-network reachability of the
@@ -502,11 +502,11 @@ is a working mitigation, not a fix for the transparent mode itself.
 ### How to reproduce the diagnostic capture
 
 ```bash
-cd /opt/Zenith-TG
+cd /opt/Zenith-WS
 git pull origin main
-systemctl stop tg-transparent-relay
+systemctl stop ws-transparent-relay
 cd relay
-/opt/Zenith-TG/.venv/bin/python -u transparent_relay.py --host 127.0.0.1 --port 8447 -v
+/opt/Zenith-WS/.venv/bin/python -u transparent_relay.py --host 127.0.0.1 --port 8447 -v
 ```
 (Manual foreground run hits the shell's default `ulimit -n` under load —
 saw `[Errno 24] Too many open files` during a flood of connections. The
@@ -549,7 +549,7 @@ hypothesis, see above — still unconfirmed), the SNI/ALPN captured here is
 exactly the piece of information needed to go implement that branch
 correctly. Reproduce the same way as the hex-dump above (`git pull` +
 reopen Telegram on Android/Windows), except **the systemd unit's normal
-logs already show this now** (`journalctl -u tg-transparent-relay -f`) —
+logs already show this now** (`journalctl -u ws-transparent-relay -f`) —
 no need for the manual foreground `-v` run just for this signal
 specifically (still useful for the raw hex dump if the SNI parse itself
 comes back `None`/unexpected). Next step once this is captured: compare
@@ -559,7 +559,7 @@ implementing the Fake-TLS unwrap branch is warranted.
 
 Reopen Telegram on the Android device while this is running, watch for
 `non-MTProto handshake head: ...` lines. `Ctrl+C` when done, then
-`systemctl start tg-transparent-relay` to restore normal operation —
+`systemctl start ws-transparent-relay` to restore normal operation —
 don't leave the manual foreground run as the only thing serving this
 port.
 
@@ -583,7 +583,7 @@ port.
   bug, see that repo's `CLAUDE.md` — a `/opt/zapret2/lua` symlink hid the
   real core lua library files). Each stop/start cycle ran that project's
   own `init.d` iptables clear/apply logic — and despite being a formally
-  unrelated table/chain from Zenith-TG's own `nat OUTPUT` REDIRECT rules,
+  unrelated table/chain from Zenith-WS's own `nat OUTPUT` REDIRECT rules,
   it wiped them out too. `relay/transparent_relay.py` kept running the
   whole time without any indication of a problem (it only listens on
   `127.0.0.1:8447` — whether traffic actually gets redirected there is
@@ -591,7 +591,7 @@ port.
   overnight and nobody noticed until morning, well after the YouTube
   outage from the same root cause had already been found and fixed.
 - Mitigated (not root-caused, since the other service isn't ours to fix)
-  via `relay/redirect_watchdog.sh` + `tg-redirect-watchdog.timer` — runs
+  via `relay/redirect_watchdog.sh` + `ws-redirect-watchdog.timer` — runs
   every 5 minutes, checks `iptables -t nat -S OUTPUT` for any `-j
   REDIRECT` rule, and if there are truly zero (not partial corruption —
   that class hasn't been observed) runs `setup_redirect.sh remove` then
@@ -600,9 +600,9 @@ port.
   existence check, so calling it on top of already-present rules
   duplicates every REDIRECT entry instead of being a no-op.
 - Not yet installed on Server A as of this commit — `cp
-  relay/tg-redirect-watchdog.{service,timer} /etc/systemd/system/ &&
+  relay/ws-redirect-watchdog.{service,timer} /etc/systemd/system/ &&
   systemctl daemon-reload && systemctl enable --now
-  tg-redirect-watchdog.timer`, see README.md "Развёртывание на сервере".
+  ws-redirect-watchdog.timer`, see README.md "Развёртывание на сервере".
 
 ## `cf_worker/worker.js` deployed and confirmed working for web.telegram.org (2026-09-01)
 
@@ -616,7 +616,7 @@ port.
   message-data WS endpoints (`zws2.web.telegram.org`,
   `kws2.web.telegram.org`, `venus.web.telegram.org` all seen going through
   the same passthrough → CF-Worker-fallback path in `journalctl -u
-  tg-transparent-relay`) — not just the static page shell.
+  ws-transparent-relay`) — not just the static page shell.
 - Direct TCP to `149.154.167.99` still times out exactly as documented
   elsewhere in this file (SYN null-route, unaffected by any of this) —
   the Worker fallback is what actually carries the traffic, with zero
@@ -637,7 +637,7 @@ port.
   did NOT work end-to-end on the first try — pure human copy-paste error,
   not a bug**: the instructions handed over said to put "the same secret
   you just set via `wrangler secret put`" into
-  `ZTG_CF_WORKER_SECRET=` in `/etc/z2r_autobench/tgrelay.env`, and the
+  `ZWS_CF_WORKER_SECRET=` in `/etc/z2r_autobench/wsrelay.env`, and the
   literal placeholder text (including the angle brackets) got pasted in
   verbatim instead of the actual generated value. Symptom was subtle:
   `Cloudflare Worker fallback включён: ...` DID print at startup (both
@@ -653,7 +653,7 @@ port.
   deploying human's account (not reproduced here — publishing hygiene,
   same as not committing real server/provider names) — whoever redeploys
   this Worker gets their own `<something>.workers.dev` address and needs
-  to update `ZTG_CF_WORKER_HOST` accordingly; it is not a fixed, shared
+  to update `ZWS_CF_WORKER_HOST` accordingly; it is not a fixed, shared
   value across deployments.
 
 ## Same fallback extended to WhatsApp (2026-09-01)
@@ -672,7 +672,7 @@ port.
   meant for two specific domains). `setup_redirect.sh` gained
   `--cidr-file` so it can be invoked a second time for this list
   alongside the existing Telegram call; the self-loop exclusion insert
-  (`-m owner --uid-owner tgrelay -j RETURN`) is now idempotent (checked
+  (`-m owner --uid-owner wsrelay -j RETURN`) is now idempotent (checked
   via `iptables -C` before `-I`) so calling `apply` twice doesn't
   duplicate it. `worker.js`'s `ALLOWED_CIDRS` extended with the same two
   prefixes and redeployed (`RELAY_SECRET` untouched by a redeploy — it's
@@ -711,17 +711,17 @@ port.
   reused across servers or across re-runs — regenerating is cheap and
   each server should have its own), pipes it non-interactively into
   `wrangler secret put RELAY_SECRET`, idempotently writes/updates
-  `ZTG_CF_WORKER_HOST`/`ZTG_CF_WORKER_SECRET` in `tgrelay.env` (same
+  `ZWS_CF_WORKER_HOST`/`ZWS_CF_WORKER_SECRET` in `wsrelay.env` (same
   sed-if-exists-else-append idiom z2r_autobench's `z0r` already uses for
-  `ZENITH_PROFILES` — doesn't clobber `ZTG_MTPROXY_SECRET` or anything
+  `ZENITH_PROFILES` — doesn't clobber `ZWS_MTPROXY_SECRET` or anything
   else already in that file), then applies both `setup_redirect.sh`
-  calls (Telegram + WhatsApp) and restarts `tg-transparent-relay` if
+  calls (Telegram + WhatsApp) and restarts `ws-transparent-relay` if
   it's installed. `--skip-redirect` for a box where the relay service
   isn't installed yet or REDIRECT is managed separately; `--env-file`
   to target something other than the default path.
 - This directly fixes the exact bug from the WhatsApp/Telegram deploy
   session immediately before it existed: a human manually copying "the
-  same secret you just set" into `tgrelay.env` typed the literal
+  same secret you just set" into `wsrelay.env` typed the literal
   placeholder text instead, and nothing caught it until live traffic was
   tested — `deploy.sh` never round-trips the secret through a human's
   clipboard at all, it goes straight from `openssl rand` into both
@@ -744,13 +744,13 @@ port.
   intended) — this is the same class of mistake as committing a secret
   to the repo, just moved one hop away.
 - What actually ships: `deploy.sh` now caches `CLOUDFLARE_API_TOKEN`
-  itself into `tgrelay.env` (`chmod 600`) right after a deploy actually
+  itself into `wsrelay.env` (`chmod 600`) right after a deploy actually
   succeeds (inside the `set -e` path — a failed deploy never caches a
   token that might be bad/wrong-scoped). Every subsequent run on THAT
   SAME server — reading env-var first, falling back to
   `grep '^CLOUDFLARE_API_TOKEN=' "$ENV_FILE"` (deliberately not `source`-ing
   the whole file — it can carry other vars not meant to be executed) —
-  picks it up with zero prompts. `z0r`'s `tgrelay_setup_cf_worker()`
+  picks it up with zero prompts. `z0r`'s `wsrelay_setup_cf_worker()`
   mirrors the same cache check before it even decides whether to prompt,
   so the interactive question genuinely only ever appears once per
   server, not once per `deploy.sh` invocation. A genuinely new/different
@@ -763,8 +763,8 @@ port.
   to check the whole flow up front instead of hitting one missing piece
   at a time (that server had already surfaced the wrangler-not-installed
   and git-dubious-ownership issues in quick succession). Server B's
-  Zenith-TG install already had Telegram REDIRECT applied from its
-  original `tgrelay_enable()` install — `cf_worker/deploy.sh` calls
+  Zenith-WS install already had Telegram REDIRECT applied from its
+  original `wsrelay_enable()` install — `cf_worker/deploy.sh` calls
   `setup_redirect.sh apply` (Telegram) and `apply --cidr-file
   .../whatsapp_ipv4.txt` (WhatsApp) unconditionally on every run, but only
   the self-loop exclusion insert had the `-C` existence check before

@@ -5,7 +5,7 @@
  *
  * Зачем: некоторые адреса (149.154.167.99/web.telegram.org,
  * 157.240.0.60/web.whatsapp.com, 31.13.72.52/static.whatsapp.net)
- * заблокированы на границе сети NETH-4 на уровне null-route (SYN
+ * заблокированы на границе сети Server A на уровне null-route (SYN
  * роняется целиком, подтверждено живым тестом -- ни один
  * --lua-desync= трюк zapret2 не помогает, манглить нечего, пакет
  * никуда не доходит). У Cloudflare Worker собственная сеть, свой
@@ -32,7 +32,7 @@ import { connect } from 'cloudflare:sockets';
 
 const ALLOWED_CIDRS = [
   // Официальные подсети Telegram (см. https://core.telegram.org/resources/cidr.txt,
-  // тот же список, что z2r_autobench/Zenith-TG/cidr/telegram_ipv4.txt --
+  // тот же список, что z2r_autobench/Zenith-WS/cidr/telegram_ipv4.txt --
   // ОБНОВЛЯТЬ ВРУЧНУЮ ВМЕСТЕ С ТЕМ ФАЙЛОМ, если список у Telegram изменится).
   '91.105.192.0/23',
   '91.108.4.0/22',

@@ -1,9 +1,9 @@
 [Unit]
-Description=Zenith-TG REDIRECT rules watchdog (restore nat OUTPUT rules if wiped by an unrelated service)
+Description=Zenith-WS REDIRECT rules watchdog (restore nat OUTPUT rules if wiped by an unrelated service)
 After=network.target
 
 [Service]
 Type=oneshot
 # Требует root -- меняет iptables (та же привилегия, что и ручной
 # setup_redirect.sh apply/status, см. README.md).
-ExecStart=/usr/bin/bash /opt/Zenith-TG/relay/redirect_watchdog.sh
+ExecStart=/usr/bin/bash /opt/Zenith-WS/relay/redirect_watchdog.sh
