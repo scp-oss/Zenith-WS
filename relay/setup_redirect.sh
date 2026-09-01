@@ -25,9 +25,26 @@
 # должно стоять ПЕРЕД правилами REDIRECT.
 #
 # Использование:
-#   setup_redirect.sh apply [--port N] [--user NAME]
-#   setup_redirect.sh remove [--port N] [--user NAME]
+#   setup_redirect.sh apply [--port N] [--user NAME] [--cidr-file PATH]
+#   setup_redirect.sh remove [--port N] [--user NAME] [--cidr-file PATH]
 #   setup_redirect.sh status
+#
+# --cidr-file добавлен 2026-09-01 для WhatsApp (см.
+# ../cidr/whatsapp_ipv4.txt) -- та же схема, что уже работает для
+# Telegram (SYN-блэкхол -> REDIRECT на transparent_relay.py -> passthrough
+# -> Cloudflare Worker fallback), другой список подсетей. Вызывается
+# ВТОРЫМ разом, отдельно от Telegram-списка, с тем же портом --
+# transparent_relay.py уже общий (классифицирует по содержимому
+# пакета, не по тому, из-за какого REDIRECT-правила трафик сюда попал).
+#
+# ВАЖНО про несколько CIDR-файлов сразу: exclusion self-loop'а (см. ниже)
+# общий на ВСЕ REDIRECT-правила, не привязан к конкретному файлу.
+# `remove` для ОДНОГО файла всё равно попытается убрать этот exclusion --
+# если активны оба файла (Telegram + WhatsApp), убирать/переприменять их
+# нужно ВМЕСТЕ, а не по одному, иначе на секунду останутся REDIRECT-правила
+# без self-loop-защиты для оставшегося файла. `apply` теперь идемпотентен
+# по exclusion'у (проверяет перед `-I`), так что применить оба файла подряд
+# безопасно -- он не задублируется.
 
 set -euo pipefail
 
@@ -42,6 +59,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
     --user) RELAY_USER="$2"; shift 2 ;;
+    --cidr-file) CIDR_FILE="$2"; shift 2 ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -59,7 +77,12 @@ case "$ACTION" in
     # других правил, добавленных этим же скриптом, не важен (все они
     # ниже, через -A), но эта строка обязана оказаться ПЕРЕД ними.
     if id "$RELAY_USER" >/dev/null 2>&1; then
-      iptables -t nat -I OUTPUT -p tcp -m owner --uid-owner "$RELAY_USER" -j RETURN
+      # -C проверяет существование правила без побочных эффектов -- без
+      # этой проверки повторный apply (напр. второй раз для другого
+      # --cidr-file) дублировал бы exclusion при каждом вызове.
+      if ! iptables -t nat -C OUTPUT -p tcp -m owner --uid-owner "$RELAY_USER" -j RETURN 2>/dev/null; then
+        iptables -t nat -I OUTPUT -p tcp -m owner --uid-owner "$RELAY_USER" -j RETURN
+      fi
     else
       echo "Пользователь $RELAY_USER не найден -- исключение self-loop НЕ применено, добавьте вручную после создания пользователя." >&2
     fi

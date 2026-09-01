@@ -36,6 +36,22 @@ Worker проходит без единой ошибки — значит у Clo
 из-за чего Worker отвечал 403 всем запросам; после исправления секрета
 заработало сразу.
 
+**Расширено на WhatsApp 2026-09-01** — тот же класс проблемы: `curl`
+до `web.whatsapp.com`/`static.whatsapp.net` с Server A даёт чистый TCP
+timeout (SYN null-route), не DPI по SNI. `ALLOWED_CIDRS` в `worker.js`
+дополнен ДВУМЯ узкими префиксами (`157.240.0.0/17`, `31.13.64.0/18`) --
+именно теми, что содержат подтверждённо заблокированные адреса, а НЕ
+весь AS32934 Meta (35 блоков, 500k+ адресов Facebook/Instagram/
+Messenger) — см. `cidr/whatsapp_ipv4.txt` для полного обоснования.
+`setup_redirect.sh` теперь принимает `--cidr-file`, вызывается ВТОРЫМ
+разом с `--cidr-file ../cidr/whatsapp_ipv4.txt` в дополнение к обычному
+Telegram-вызову — `transparent_relay.py` трогать не пришлось, он уже
+универсален (любой не-MTProto TLS одинаково уходит в passthrough → CF
+Worker fallback, независимо от того, какой REDIRECT-список его сюда
+привёл). После правки `worker.js` нужен **`wrangler deploy` заново** --
+`RELAY_SECRET` при этом не сбрасывается (это отдельная секретная
+переменная, не часть кода воркера).
+
 ## Деплой
 
 Нужен Cloudflare-аккаунт с включённым Workers (бесплатного плана

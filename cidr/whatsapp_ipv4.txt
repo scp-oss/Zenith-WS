@@ -1,0 +1,14 @@
+# Deliberately narrow, NOT Meta's full AS32934 (35 CIDR blocks, 500k+
+# addresses covering Facebook/Instagram/Messenger/Threads too) -- see
+# CLAUDE.md "WhatsApp SYN-blackhole, same class as Telegram" for the
+# full reasoning. Only the two prefixes actually containing the
+# confirmed-blocked WhatsApp endpoints (2026-09-01, `curl` from Server A:
+# TCP connect timeout, no reply, to both web.whatsapp.com=157.240.0.60
+# and static.whatsapp.net=31.13.72.52 -- same SYN null-route class as
+# Telegram's 149.154.160.0/20, not a DPI/SNI block). Prefixes sourced
+# from AS32934's own published RIR records (via ipregistry.co), not
+# guessed from the two IPs alone. Expand only with the same kind of
+# live evidence -- don't add more of AS32934 speculatively, unrelated
+# Facebook/Instagram traffic through here is unnecessary blast radius.
+157.240.0.0/17
+31.13.64.0/18
