@@ -603,3 +603,55 @@ port.
   relay/tg-redirect-watchdog.{service,timer} /etc/systemd/system/ &&
   systemctl daemon-reload && systemctl enable --now
   tg-redirect-watchdog.timer`, see README.md "Развёртывание на сервере".
+
+## `cf_worker/worker.js` deployed and confirmed working for web.telegram.org (2026-09-01)
+
+- This closes the open question `cf_worker/README.md` had been carrying
+  since it was written ("не проверено на реальном трафике, нужен деплой в
+  реальный Cloudflare-аккаунт, к которому у этой сессии Claude нет
+  доступа") — a human did the actual deploy (Cloudflare account access is
+  inherently outside what any Claude session can do), Claude walked
+  through the steps live. **Confirmed on Server A**: `web.telegram.org`
+  loads fully through the VLESS tunnel now, including the real
+  message-data WS endpoints (`zws2.web.telegram.org`,
+  `kws2.web.telegram.org`, `venus.web.telegram.org` all seen going through
+  the same passthrough → CF-Worker-fallback path in `journalctl -u
+  tg-transparent-relay`) — not just the static page shell.
+- Direct TCP to `149.154.167.99` still times out exactly as documented
+  elsewhere in this file (SYN null-route, unaffected by any of this) —
+  the Worker fallback is what actually carries the traffic, with zero
+  `Cloudflare Worker fallback ... тоже не удался` lines in the log,
+  confirming Cloudflare's own network path to that IP is clean.
+- **Deploy hit one real snag, not an architecture problem**: `wrangler`
+  (npm) requires Node ≥22; Debian's own `apt install nodejs` on Server A
+  only provides v20 — installed via `nvm install 22` instead of fighting
+  apt/NodeSource. Also, `wrangler login`'s OAuth callback listens on
+  `localhost` **on the machine running wrangler** (the server), which is
+  useless if the human opens the printed link in a browser on their own
+  laptop — either `ssh -L 8976:localhost:8976` from the laptop first, or
+  skip OAuth entirely and use a Cloudflare API token
+  (`export CLOUDFLARE_API_TOKEN=...`, "Edit Cloudflare Workers" template
+  scope is sufficient) — the latter is simpler for a headless remote
+  server and is what actually got used here.
+- **First `wrangler deploy` + `wrangler secret put RELAY_SECRET` attempt
+  did NOT work end-to-end on the first try — pure human copy-paste error,
+  not a bug**: the instructions handed over said to put "the same secret
+  you just set via `wrangler secret put`" into
+  `ZTG_CF_WORKER_SECRET=` in `/etc/z2r_autobench/tgrelay.env`, and the
+  literal placeholder text (including the angle brackets) got pasted in
+  verbatim instead of the actual generated value. Symptom was subtle:
+  `Cloudflare Worker fallback включён: ...` DID print at startup (both
+  `CF_WORKER_HOST`/`CF_WORKER_SECRET` were non-empty strings, which is
+  all that log line checks), so the feature LOOKED configured — the real
+  giveaway was every single passthrough attempt still failing with no
+  working fallback until the placeholder was replaced with the real
+  secret and the service restarted again. Worth remembering next time
+  someone hands over a "paste the same value from step N" instruction —
+  the software can't tell a placeholder from a real secret if both are
+  just non-empty strings.
+- Cloudflare account's own workers.dev subdomain is tied to the
+  deploying human's account (not reproduced here — publishing hygiene,
+  same as not committing real server/provider names) — whoever redeploys
+  this Worker gets their own `<something>.workers.dev` address and needs
+  to update `ZTG_CF_WORKER_HOST` accordingly; it is not a fixed, shared
+  value across deployments.
