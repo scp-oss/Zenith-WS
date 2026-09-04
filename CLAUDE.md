@@ -893,3 +893,48 @@ port.
   rules were silently left behind in `nat OUTPUT` after "stopping" or
   even fully uninstalling Zenith-WS. Both now remove both lists
   explicitly.
+
+## Second, independent toggle layer: the Cloudflare Worker itself (2026-09-04, same-day follow-up)
+
+- Direct request for a flatter menu (`z0r` item 22 → five items directly
+  instead of a nested "1) service / 2) worker / 3) REDIRECT submenu"
+  layout) surfaced a real gap while implementing it: the REDIRECT toggle
+  above only controls whether traffic to a CIDR family reaches the relay
+  at all — it says nothing about whether `cf_worker/worker.js` (a
+  *separate* deployed artifact) will actually carry that traffic once it
+  arrives. Those are genuinely two different layers for Telegram
+  specifically: real MTProto traffic never needs the Worker at all (it's
+  handled directly by `transparent_relay.py`'s own WS bridge to
+  `149.154.167.220`) — only the *other* kind of Telegram traffic
+  (web.telegram.org's plain TLS/WebSocket) depends on the Worker
+  fallback. WhatsApp has no such split (everything it sends is plain
+  TLS, so REDIRECT-off already means Worker-off too for it) — but the
+  same toggle shape was added for both, for a uniform menu and because a
+  future WhatsApp-side split isn't ruled out.
+- `worker.js`'s `ALLOWED_CIDRS` split into `TELEGRAM_CIDRS`/
+  `WHATSAPP_CIDRS`; `isAllowedDst(ip, env)` now also checks
+  `env.ALLOW_TELEGRAM`/`env.ALLOW_WHATSAPP` (plain, non-secret
+  `wrangler.toml` `[vars]`, defaulting to `"true"` — a var that's merely
+  *missing* is treated as allowed, only an explicit `"false"` denies, so
+  an existing deployment that predates this change keeps working
+  identically until someone actually flips the new toggle).
+  `deploy.sh` rewrites those two `wrangler.toml` lines via `sed` (not
+  `wrangler deploy --var` on the command line) right before every
+  deploy, reading the desired state from `ZWS_TELEGRAM_WORKER`/
+  `ZWS_WHATSAPP_WORKER` in `wsrelay.env` (same file, same idiom as the
+  REDIRECT flags) — choosing `sed`-into-the-file over a CLI flag was
+  deliberate: the current intended state is then visible just by
+  reading `wrangler.toml`, not only reconstructable from past
+  `deploy.sh` invocations.
+- **Real cost, not free**: unlike the REDIRECT toggle (an instant local
+  `iptables` call), flipping either Worker toggle requires an actual
+  `wrangler deploy` — a real network round-trip to Cloudflare, taking a
+  few seconds — because Worker vars are baked in at deploy time, there's
+  no live "patch this one var" API used here. `z0r`'s `wsrelay_toggle_worker()`
+  calls the full `wsrelay_setup_cf_worker()` flow every time for this
+  reason (also doubles as first-time setup if the Worker was never
+  deployed at all — status shows `NONE` rather than `OFF` in that case).
+  Not yet live-verified against a real Cloudflare account (same
+  standing limitation as the rest of this file's Worker-side notes —
+  no Cloudflare account access from a Claude session, see README.md
+  "Почему нельзя просто закоммитить готовый секрет").

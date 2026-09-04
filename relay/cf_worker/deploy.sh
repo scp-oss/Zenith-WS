@@ -101,6 +101,30 @@ fi
 
 cd "$SCRIPT_DIR"
 
+# ALLOW_TELEGRAM/ALLOW_WHATSAPP в wrangler.toml -- независимое
+# включение/выключение доступа к web.telegram.org/web.WhatsApp через
+# ЭТОТ воркер (добавлено 2026-09-04, см. CLAUDE.md "Независимое
+# включение/выключение Telegram и WhatsApp"). Читаем сохранённое
+# состояние из ENV_FILE (ZWS_TELEGRAM_WORKER/ZWS_WHATSAPP_WORKER,
+# записывается z0r'ом при переключении) -- по умолчанию "enabled" для
+# обоих, чтобы сервер, ни разу не трогавший новый тумблер, продолжал
+# работать как раньше (оба всегда были разрешены безусловно). Правим
+# wrangler.toml через sed, а не `wrangler deploy --var` -- текущее
+# состояние тогда видно прямо в файле, а не только в истории вызовов
+# этого скрипта.
+tg_worker_state="enabled"; wa_worker_state="enabled"
+if [ -f "$ENV_FILE" ]; then
+  tg_worker_state="$(grep '^ZWS_TELEGRAM_WORKER=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+  wa_worker_state="$(grep '^ZWS_WHATSAPP_WORKER=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+  [ -n "$tg_worker_state" ] || tg_worker_state="enabled"
+  [ -n "$wa_worker_state" ] || wa_worker_state="enabled"
+fi
+tg_var="true"; [ "$tg_worker_state" = "disabled" ] && tg_var="false"
+wa_var="true"; [ "$wa_worker_state" = "disabled" ] && wa_var="false"
+sed -i "s/^ALLOW_TELEGRAM = .*/ALLOW_TELEGRAM = \"$tg_var\"/" wrangler.toml
+sed -i "s/^ALLOW_WHATSAPP = .*/ALLOW_WHATSAPP = \"$wa_var\"/" wrangler.toml
+echo "==> Воркер: web.telegram.org=$tg_worker_state, web.WhatsApp=$wa_worker_state" >&2
+
 echo "==> Деплой воркера (wrangler deploy)..." >&2
 DEPLOY_OUT="$(wrangler deploy 2>&1)" || { echo "$DEPLOY_OUT" >&2; exit 1; }
 echo "$DEPLOY_OUT" >&2

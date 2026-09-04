@@ -5,3 +5,15 @@ compatibility_date = "2024-09-23"
 # RELAY_SECRET задаётся ПОСЛЕ первого деплоя через:
 #   wrangler secret put RELAY_SECRET
 # (не хранить секрет прямо тут в открытом виде -- см. README.md рядом)
+
+# ALLOW_TELEGRAM/ALLOW_WHATSAPP -- независимое включение/выключение
+# доступа к web.telegram.org и web.WhatsApp через этот воркер (добавлено
+# 2026-09-04, см. CLAUDE.md "Независимое включение/выключение
+# Telegram и WhatsApp"). Обычные (не секретные) vars -- deploy.sh
+# переписывает эти две строки перед каждым `wrangler deploy` по
+# сохранённому в wsrelay.env состоянию, не через `--var` на командной
+# строке, чтобы текущее состояние было видно прямо в файле, а не только
+# в истории вызовов deploy.sh.
+[vars]
+ALLOW_TELEGRAM = "true"
+ALLOW_WHATSAPP = "true"

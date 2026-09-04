@@ -22,18 +22,21 @@
  * Cloudflare.
  *
  * НАМЕРЕННО не открытый релей: (1) dst разрешён ТОЛЬКО из подсетей,
- * явно перечисленных в ALLOWED_CIDRS (см. ниже про источники каждого
- * блока), любой другой dst -- отказ; (2) обязателен секрет (переменная
- * окружения RELAY_SECRET в настройках Worker, задаётся вручную при
- * деплое) -- без него 403, чтобы этим не мог пользоваться кто угодно,
- * кто угадает URL воркера.
+ * явно перечисленных в TELEGRAM_CIDRS/WHATSAPP_CIDRS (см. ниже про
+ * источники каждого блока), любой другой dst -- отказ; каждый список
+ * дополнительно можно выключить целиком через vars ALLOW_TELEGRAM/
+ * ALLOW_WHATSAPP в wrangler.toml (не трогая другой список -- см.
+ * CLAUDE.md "Независимое включение/выключение Telegram и WhatsApp");
+ * (2) обязателен секрет (переменная окружения RELAY_SECRET в настройках
+ * Worker, задаётся вручную при деплое) -- без него 403, чтобы этим не
+ * мог пользоваться кто угодно, кто угадает URL воркера.
  */
 import { connect } from 'cloudflare:sockets';
 
-const ALLOWED_CIDRS = [
-  // Официальные подсети Telegram (см. https://core.telegram.org/resources/cidr.txt,
-  // тот же список, что z2r_autobench/Zenith-WS/cidr/telegram_ipv4.txt --
-  // ОБНОВЛЯТЬ ВРУЧНУЮ ВМЕСТЕ С ТЕМ ФАЙЛОМ, если список у Telegram изменится).
+// Официальные подсети Telegram (см. https://core.telegram.org/resources/cidr.txt,
+// тот же список, что z2r_autobench/Zenith-WS/cidr/telegram_ipv4.txt --
+// ОБНОВЛЯТЬ ВРУЧНУЮ ВМЕСТЕ С ТЕМ ФАЙЛОМ, если список у Telegram изменится).
+const TELEGRAM_CIDRS = [
   '91.105.192.0/23',
   '91.108.4.0/22',
   '91.108.8.0/22',
@@ -43,11 +46,14 @@ const ALLOWED_CIDRS = [
   '91.108.56.0/22',
   '149.154.160.0/20',
   '185.76.151.0/24',
-  // WhatsApp/Meta -- см. cidr/whatsapp_ipv4.txt для полное обоснование:
-  // намеренно ТОЛЬКО эти два префикса (содержат подтверждённо
-  // заблокированные web.whatsapp.com/static.whatsapp.net), НЕ весь
-  // AS32934 (35 блоков, 500k+ адресов Facebook/Instagram/Messenger).
-  // ОБНОВЛЯТЬ ВМЕСТЕ С ТЕМ ФАЙЛОМ.
+];
+
+// WhatsApp/Meta -- см. cidr/whatsapp_ipv4.txt для полного обоснования:
+// намеренно ТОЛЬКО эти два префикса (содержат подтверждённо
+// заблокированные web.whatsapp.com/static.whatsapp.net), НЕ весь
+// AS32934 (35 блоков, 500k+ адресов Facebook/Instagram/Messenger).
+// ОБНОВЛЯТЬ ВМЕСТЕ С ТЕМ ФАЙЛОМ.
+const WHATSAPP_CIDRS = [
   '157.240.0.0/17',
   '31.13.64.0/18',
 ];
@@ -68,8 +74,18 @@ function ipInCidr(ip, cidr) {
   return (ipInt & mask) === (baseInt & mask);
 }
 
-function isAllowedDst(ip) {
-  return ALLOWED_CIDRS.some((cidr) => ipInCidr(ip, cidr));
+// ALLOW_TELEGRAM/ALLOW_WHATSAPP -- обычные (не секретные) vars из
+// wrangler.toml, независимо переписываемые deploy.sh перед каждым
+// деплоем (см. CLAUDE.md "Независимое включение/выключение Telegram и
+// WhatsApp") -- позволяет выключить доступ через этот воркер к одному
+// сервису, не трогая другой, без правки самого кода. Отсутствие
+// переменной (напр. деплой без wrangler.toml, руками) трактуется как
+// "разрешено" -- только явное "false" запрещает, чтобы не сломать
+// существующие деплои задним числом.
+function isAllowedDst(ip, env) {
+  if (env.ALLOW_TELEGRAM !== 'false' && TELEGRAM_CIDRS.some((cidr) => ipInCidr(ip, cidr))) return true;
+  if (env.ALLOW_WHATSAPP !== 'false' && WHATSAPP_CIDRS.some((cidr) => ipInCidr(ip, cidr))) return true;
+  return false;
 }
 
 export default {
@@ -82,7 +98,7 @@ export default {
     if (!env.RELAY_SECRET || secret !== env.RELAY_SECRET) {
       return new Response('forbidden', { status: 403 });
     }
-    if (!isAllowedDst(dst)) {
+    if (!isAllowedDst(dst, env)) {
       return new Response('dst not in allowed Telegram ranges', { status: 400 });
     }
     if (!(port > 0 && port < 65536)) {

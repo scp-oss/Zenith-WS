@@ -38,8 +38,10 @@ Worker проходит без единой ошибки — значит у Clo
 
 **Расширено на WhatsApp 2026-09-01** — тот же класс проблемы: `curl`
 до `web.whatsapp.com`/`static.whatsapp.net` с Server A даёт чистый TCP
-timeout (SYN null-route), не DPI по SNI. `ALLOWED_CIDRS` в `worker.js`
-дополнен ДВУМЯ узкими префиксами (`157.240.0.0/17`, `31.13.64.0/18`) --
+timeout (SYN null-route), не DPI по SNI. `worker.js` (список подсетей
+теперь разбит на `TELEGRAM_CIDRS`/`WHATSAPP_CIDRS`, см. ниже про
+2026-09-04) дополнен ДВУМЯ узкими префиксами (`157.240.0.0/17`,
+`31.13.64.0/18`) --
 именно теми, что содержат подтверждённо заблокированные адреса, а НЕ
 весь AS32934 Meta (35 блоков, 500k+ адресов Facebook/Instagram/
 Messenger) — см. `cidr/whatsapp_ipv4.txt` для полного обоснования.
@@ -60,10 +62,21 @@ Worker fallback, независимо от того, какой REDIRECT-спи�
 ../cidr/whatsapp_ipv4.txt` выключает именно WhatsApp, не трогая
 Telegram (`setup_redirect.sh enabled --cidr-file PATH` — проверить,
 что сейчас включено). Через `z0r` (соседний репозиторий
-`z2r_autobench`) то же самое — пункт 22 → "Telegram/WhatsApp по
-отдельности". `deploy.sh`, будучи вызванным повторно, уважает это
-решение (не включает список обратно молча) — см. `CLAUDE.md`
-"Independent enable/disable for Telegram and WhatsApp REDIRECT".
+`z2r_autobench`) то же самое — пункт 22 → 3 "WhatsApp REDIRECT".
+`deploy.sh`, будучи вызванным повторно, уважает это решение (не
+включает список обратно молча) — см. `CLAUDE.md` "Independent
+enable/disable for Telegram and WhatsApp REDIRECT".
+
+**Второй, независимый уровень тумблера — сам воркер (добавлено
+2026-09-04):** REDIRECT выше решает, доходит ли трафик до relay вообще;
+`ALLOW_TELEGRAM`/`ALLOW_WHATSAPP` в `wrangler.toml` (обычные vars, не
+секрет) решают, пропустит ли ЭТОТ воркер дальше то, что уже дошло. Для
+Telegram это реально другая ось — настоящий MTProto воркер вообще не
+использует (его несёт сам `transparent_relay.py` напрямую), воркер
+нужен только web.telegram.org. `z0r` пункт 22 → 4/5 переключает их
+(редактирует `wrangler.toml` и передеплоивает — в отличие от REDIRECT
+это НЕ мгновенно, нужен реальный `wrangler deploy`). См. `CLAUDE.md`
+"Second, independent toggle layer: the Cloudflare Worker itself".
 
 ## Почему нельзя просто закоммитить готовый секрет
 
