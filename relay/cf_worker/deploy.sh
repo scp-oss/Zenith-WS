@@ -137,10 +137,36 @@ for kv in "ZWS_CF_WORKER_HOST=$WORKER_HOST" "ZWS_CF_WORKER_SECRET=$SECRET" "CLOU
 done
 echo "==> Записано в $ENV_FILE (права 600 — там же теперь и CLOUDFLARE_API_TOKEN, для следующего запуска без вопросов)." >&2
 
+# Telegram и WhatsApp REDIRECT теперь независимо включаются/выключаются
+# (z0r пункт 22 -> "Telegram/WhatsApp по отдельности", см. CLAUDE.md
+# "Независимое включение/выключение Telegram и WhatsApp") -- этот скрипт
+# может быть вызван повторно просто чтобы обновить/задеплоить воркер
+# заново (напр. ротация секрета), и НЕ должен молча включать обратно
+# список, который человек осознанно выключил (напр. WhatsApp сломал
+# Instagram на том же ASN, живой случай, послуживший поводом для самого
+# разделения). Дефолт -- "enabled" для ОБОИХ, чтобы поведение на первом
+# в жизни сервера деплое не изменилось (раньше эти два apply были
+# безусловными).
 if [ "$SKIP_REDIRECT" = "0" ]; then
-  echo "==> Применяю REDIRECT (Telegram + WhatsApp)..." >&2
-  "$RELAY_DIR/setup_redirect.sh" apply
-  "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/whatsapp_ipv4.txt"
+  tg_state="enabled"; wa_state="enabled"
+  if [ -f "$ENV_FILE" ]; then
+    tg_state="$(grep '^ZWS_TELEGRAM_REDIRECT=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+    wa_state="$(grep '^ZWS_WHATSAPP_REDIRECT=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+    [ -n "$tg_state" ] || tg_state="enabled"
+    [ -n "$wa_state" ] || wa_state="enabled"
+  fi
+  if [ "$tg_state" = "disabled" ]; then
+    echo "==> Telegram REDIRECT пропущен (отмечен как выключенный в $ENV_FILE)." >&2
+  else
+    echo "==> Применяю REDIRECT (Telegram)..." >&2
+    "$RELAY_DIR/setup_redirect.sh" apply
+  fi
+  if [ "$wa_state" = "disabled" ]; then
+    echo "==> WhatsApp REDIRECT пропущен (отмечен как выключенный в $ENV_FILE)." >&2
+  else
+    echo "==> Применяю REDIRECT (WhatsApp)..." >&2
+    "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/whatsapp_ipv4.txt"
+  fi
 fi
 
 if systemctl list-unit-files ws-transparent-relay.service >/dev/null 2>&1; then

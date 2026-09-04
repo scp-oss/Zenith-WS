@@ -27,7 +27,18 @@
 # Использование:
 #   setup_redirect.sh apply [--port N] [--user NAME] [--cidr-file PATH]
 #   setup_redirect.sh remove [--port N] [--user NAME] [--cidr-file PATH]
+#   setup_redirect.sh enabled [--port N] [--cidr-file PATH]
 #   setup_redirect.sh status
+#
+# `enabled` (добавлено 2026-09-04, см. "Независимое включение/выключение
+# Telegram и WhatsApp" в CLAUDE.md) — код возврата 0/1, применён ли
+# REDIRECT для ЭТОГО КОНКРЕТНОГО --cidr-file прямо сейчас (проверяет
+# правило для первой подсети из файла, apply/remove всегда действуют на
+# весь файл разом, так что этого одного представителя достаточно).
+# Существует, чтобы вызывающий код (z0r) не дублировал у себя парсинг
+# CIDR-файла второй раз — та же причина, по которой
+# `z2r_detect_governing_profile()` живёт в одном месте, см.
+# z2r_autobench/CLAUDE.md "same fact duplicated in two files" класс багов.
 #
 # --cidr-file добавлен 2026-09-01 для WhatsApp (см.
 # ../cidr/whatsapp_ipv4.txt) -- та же схема, что уже работает для
@@ -112,14 +123,33 @@ case "$ACTION" in
       iptables -t nat -D OUTPUT -p tcp -d "$cidr" --dport 443 \
         -j REDIRECT --to-port "$PORT" 2>/dev/null || true
     done
-    iptables -t nat -D OUTPUT -p tcp -m owner --uid-owner "$RELAY_USER" -j RETURN 2>/dev/null || true
-    echo "Правила для порта $PORT (и исключение для $RELAY_USER) удалены (если были)" >&2
+    # Исключение self-loop общее на ВСЕ REDIRECT-правила (см. шапку файла
+    # выше), не привязано к конкретному --cidr-file -- снимаем его ТОЛЬКО
+    # если после удаления списка выше REDIRECT-правил в nat OUTPUT не
+    # осталось вообще. Раньше снималось безусловно при любом remove --
+    # живой баг, найденный 2026-09-04 при разборе независимого включения/
+    # выключения Telegram и WhatsApp: `remove --cidr-file whatsapp...`
+    # снимал бы исключение целиком, оставляя ЕЩЁ АКТИВНЫЙ Telegram-REDIRECT
+    # без self-loop-защиты -- тот же класс бага, что уже был найден и
+    # исправлен 2026-08-23 (relay заворачивает свои же исходящие попытки
+    # сам на себя через REDIRECT, ложно выглядит как "IP доступен").
+    remaining="$(iptables -t nat -S OUTPUT 2>/dev/null | grep -c -- '-j REDIRECT' || true)"
+    if [ "$remaining" -eq 0 ]; then
+      iptables -t nat -D OUTPUT -p tcp -m owner --uid-owner "$RELAY_USER" -j RETURN 2>/dev/null || true
+      echo "Правила для порта $PORT удалены (если были); исключение для $RELAY_USER тоже снято -- других REDIRECT-правил не осталось." >&2
+    else
+      echo "Правила для порта $PORT удалены (если были); исключение для $RELAY_USER оставлено -- ещё активны другие REDIRECT-правила ($remaining)." >&2
+    fi
+    ;;
+  enabled)
+    first_cidr="${CIDRS[0]}"
+    iptables -t nat -C OUTPUT -p tcp -d "$first_cidr" --dport 443 -j REDIRECT --to-port "$PORT" 2>/dev/null
     ;;
   status)
     iptables -t nat -L OUTPUT -n -v --line-numbers | grep -E "REDIRECT|Chain OUTPUT"
     ;;
   *)
-    echo "Использование: $0 apply|remove|status [--port N]" >&2
+    echo "Использование: $0 apply|remove|enabled|status [--port N]" >&2
     exit 1
     ;;
 esac

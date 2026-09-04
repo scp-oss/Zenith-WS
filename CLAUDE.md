@@ -824,3 +824,72 @@ port.
   `systemctl restart ws-transparent-relay`) to see whether 3s is short
   enough to fit inside WhatsApp iOS's own connectivity-check patience,
   or whether it needs to go lower still.
+
+## Independent enable/disable for Telegram and WhatsApp REDIRECT (2026-09-04)
+
+- Direct request, motivated by a real live symptom: after experimenting
+  with the WhatsApp REDIRECT (`cidr/whatsapp_ipv4.txt`,
+  `157.240.0.0/17`+`31.13.64.0/18`), Instagram stopped working normally
+  for the user. Root cause is architectural, not a bug in the WhatsApp
+  addition itself: those two prefixes are Meta's own ASN ranges, and
+  Instagram's ordinary CDN/API traffic resolves into the *same* subnets
+  — REDIRECT is IP-range-scoped, not domain-scoped, so turning on
+  WhatsApp REDIRECT unavoidably also captures unrelated Instagram TCP:443
+  connections and routes them through `transparent_relay.py`'s
+  passthrough → CF-Worker fallback path, adding latency/failure modes
+  Instagram's own client doesn't tolerate as gracefully as Telegram's.
+  There is no way to fix this by refining the CIDR list further (both
+  services genuinely share the same address space) — the only real fix
+  is being able to turn WhatsApp's REDIRECT off independently while
+  keeping Telegram's on, so a user hitting this can trade away WhatsApp
+  Web/native access in the browser without losing the relay's actual
+  reason to exist (Telegram).
+- `setup_redirect.sh` gained a new `enabled --cidr-file PATH` action
+  (exit 0/1) — checks whether the REDIRECT rule for that file's first
+  CIDR is currently applied, so callers (z0r) don't need to re-parse the
+  CIDR file a second time just to answer "is this one on or off right
+  now" (same "don't duplicate the same fact in two files" lesson as
+  `z2r_detect_governing_profile()` in z2r_autobench's CLAUDE.md).
+- **Real bug found and fixed in the same pass, not just a missing
+  feature**: `remove`'s last line unconditionally deleted the self-loop
+  exclusion (`-m owner --uid-owner wsrelay -j RETURN`) on every call,
+  regardless of `--cidr-file`. Before independent toggling existed this
+  was harmless in practice (both lists were always removed together, if
+  at all) — but the moment `remove --cidr-file whatsapp_ipv4.txt` needs
+  to work while Telegram's REDIRECT stays active, that unconditional
+  delete would strip self-loop protection out from under the *still
+  active* Telegram rules, silently reintroducing the exact self-loop bug
+  already found and fixed 2026-08-23 (relay's own outbound passthrough
+  attempts loop back into REDIRECT, falsely appearing as "IP reachable").
+  Fixed: `remove` now counts remaining `-j REDIRECT` rules in `nat
+  OUTPUT` *after* removing this file's own entries, and only removes the
+  exclusion if that count is zero. Verified live in a synthetic sandbox
+  (two throwaway `/29` CIDR files, a scratch system user): apply both →
+  remove one → exclusion correctly stays and the other list's `enabled`
+  check still reports true → remove the last one → exclusion is now
+  correctly removed too.
+- `cf_worker/deploy.sh` used to unconditionally re-apply BOTH Telegram
+  and WhatsApp REDIRECT on every run, including a re-run whose only
+  purpose is rotating the Worker secret — which would have silently
+  turned WhatsApp's REDIRECT back on the moment someone who'd disabled
+  it for the Instagram problem above revisited the Cloudflare Worker
+  setup for an unrelated reason. Fixed: reads
+  `ZWS_TELEGRAM_REDIRECT`/`ZWS_WHATSAPP_REDIRECT` from the same
+  `wsrelay.env` it already uses for secrets (`enabled` if unset, so a
+  server that has never touched the new toggle keeps its old, unchanged
+  default behavior) and skips whichever side is marked `disabled`.
+- z0r side (item 22 → ON-state submenu → new item 3, "Telegram/WhatsApp
+  по отдельности"): a small toggle menu that shows live ON/OFF for each
+  (via the new `enabled` action, not a second parse of the CIDR files)
+  and calls `apply`/`remove --cidr-file` for just the one the user
+  picked, writing the same `ZWS_TELEGRAM_REDIRECT`/`ZWS_WHATSAPP_REDIRECT`
+  flags into `wsrelay.env` that `deploy.sh` now reads. See
+  z2r_autobench's own CLAUDE.md for the menu-side details.
+- Also fixed while touching this: `_wsrelay_do_stop()`/`uninstall_ws_relay()`
+  on the z0r side both used to call `setup_redirect.sh remove` with no
+  `--cidr-file`, which only ever touched Telegram's default list — if
+  WhatsApp REDIRECT had ever been applied (the normal case, since
+  `cf_worker/deploy.sh` applied it unconditionally before this fix), its
+  rules were silently left behind in `nat OUTPUT` after "stopping" or
+  even fully uninstalling Zenith-WS. Both now remove both lists
+  explicitly.
