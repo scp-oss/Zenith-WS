@@ -62,7 +62,8 @@ Worker fallback, независимо от того, какой REDIRECT-спи�
 ../cidr/whatsapp_ipv4.txt` выключает именно WhatsApp, не трогая
 Telegram (`setup_redirect.sh enabled --cidr-file PATH` — проверить,
 что сейчас включено). Через `z0r` (соседний репозиторий
-`z2r_autobench`) то же самое — пункт 22 → 3 "WhatsApp REDIRECT".
+`z2r_autobench`) то же самое — пункт 31 → 3 "WhatsApp REDIRECT" (был
+пункт 22 до 2026-09-05, см. z2r_autobench/CLAUDE.md).
 `deploy.sh`, будучи вызванным повторно, уважает это решение (не
 включает список обратно молча) — см. `CLAUDE.md` "Independent
 enable/disable for Telegram and WhatsApp REDIRECT".
@@ -73,7 +74,7 @@ enable/disable for Telegram and WhatsApp REDIRECT".
 секрет) решают, пропустит ли ЭТОТ воркер дальше то, что уже дошло. Для
 Telegram это реально другая ось — настоящий MTProto воркер вообще не
 использует (его несёт сам `transparent_relay.py` напрямую), воркер
-нужен только web.telegram.org. `z0r` пункт 22 → 4/5 переключает их
+нужен только web.telegram.org. `z0r` пункт 31 → 4/5 переключает их
 (редактирует `wrangler.toml` и передеплоивает — в отличие от REDIRECT
 это НЕ мгновенно, нужен реальный `wrangler deploy`). См. `CLAUDE.md`
 "Second, independent toggle layer: the Cloudflare Worker itself".
