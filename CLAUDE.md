@@ -878,10 +878,13 @@ port.
   `wsrelay.env` it already uses for secrets (`enabled` if unset, so a
   server that has never touched the new toggle keeps its old, unchanged
   default behavior) and skips whichever side is marked `disabled`.
-- z0r side (item 22, renumbered to 31 on 2026-09-05 when 9 new
-  per-profile items were inserted at 16-24 — see z2r_autobench's own
-  CLAUDE.md "z0r main menu renumbering" — → ON-state submenu → new
-  item 3, "Telegram/WhatsApp по отдельности"): a small toggle menu that
+- z0r side (item 22, renumbered TWICE on 2026-09-05 — first to 31 when 9
+  new per-profile items were inserted at 16-24, then to its current,
+  final `14 -> 3` a few hours later when the whole top-level menu was
+  reorganized again and "Модули" collapsed into one submenu item — see
+  z2r_autobench's own CLAUDE.md "z0r main menu overhaul" for the full
+  mapping — → ON-state submenu → new item 3, "Telegram/WhatsApp по
+  отдельности"): a small toggle menu that
   shows live ON/OFF for each
   (via the new `enabled` action, not a second parse of the CIDR files)
   and calls `apply`/`remove --cidr-file` for just the one the user
@@ -899,8 +902,8 @@ port.
 
 ## Second, independent toggle layer: the Cloudflare Worker itself (2026-09-04, same-day follow-up)
 
-- Direct request for a flatter menu (`z0r` item 22, now 31 — see the
-  2026-09-05 renumbering note above → five items directly
+- Direct request for a flatter menu (`z0r` item 22, now `14 -> 3` — see
+  the 2026-09-05 renumbering note above → five items directly
   instead of a nested "1) service / 2) worker / 3) REDIRECT submenu"
   layout) surfaced a real gap while implementing it: the REDIRECT toggle
   above only controls whether traffic to a CIDR family reaches the relay
