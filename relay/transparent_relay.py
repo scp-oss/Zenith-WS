@@ -124,6 +124,30 @@ CF_WORKER_TIMEOUT = 8.0
 # это не должно ложно обрубать действительно доступные адреса.
 PASSTHROUGH_DIRECT_TIMEOUT = 3.0
 
+# Живой случай 2026-09-08 (Server A, WhatsApp Android): отправка одного
+# сообщения открывает СРАЗУ ДВА passthrough-соединения (api.whatsapp.net +
+# graph.whatsapp.com), оба на один и тот же IP -- живой SNI-снифер
+# transparent_relay.py подтвердил это в момент реальной отправки, см.
+# CLAUDE.md z2r_autobench "Публикационная гигиена"/этот файл же для
+# методики захвата. Для IP, про которые УЖЕ подтверждено (не догадка --
+# см. cidr/whatsapp_ipv4.txt и его же комментарии), что прямое TCP
+# гарантированно проваливается (SYN null-route), PASSTHROUGH_DIRECT_TIMEOUT
+# тратится впустую на КАЖДОЕ из двух соединений -- итог 2*3с+ до того, как
+# оба доберутся до рабочего CF Worker fallback. WhatsApp, по всей
+# видимости, ждёт подтверждения отправки в окно короче этого суммарного
+# времени и решает, что сообщение не ушло, хотя технически туннель через
+# Worker в итоге устанавливается. Фикс: для этих конкретных, уже
+# подтверждённых IP пропускаем прямую попытку целиком, сразу идём через
+# Worker -- экономит PASSTHROUGH_DIRECT_TIMEOUT на каждое соединение.
+# Единственные два IP отсюда сейчас: static.whatsapp.net/graph.whatsapp.com/
+# api.whatsapp.net (все резолвятся на один IP) и web.whatsapp.com -- НЕ
+# расширять на основании догадок, только по такой же живой проверке
+# (curl/SYN-тест или SNI-снифер), как и остальные записи в этом файле.
+_KNOWN_BLOCKED_IPS = frozenset({
+    '31.13.72.52',   # static.whatsapp.net / graph.whatsapp.com / api.whatsapp.net
+    '157.240.0.60',  # web.whatsapp.com
+})
+
 
 # Единственные DC, которые реально существуют у Telegram -- 1-5, плюс
 # те же номера +10000 для тестовой среды (см. is_test_dc в
@@ -351,6 +375,28 @@ async def _passthrough_plain_tcp(reader: asyncio.StreamReader, writer: asyncio.S
     async with _passthrough_semaphore:
         log.info("[%s] не MTProto -- прозрачный TCP passthrough к %s:%d "
                  "(настоящий адрес назначения до REDIRECT)", label, dst_ip, dst_port)
+
+        # См. _KNOWN_BLOCKED_IPS выше -- для этих IP прямая попытка ГАРАНТИРОВАННО
+        # проваливается (уже подтверждено), тратить на неё PASSTHROUGH_DIRECT_TIMEOUT
+        # смысла нет, только задерживает переключение на рабочий Worker fallback.
+        if dst_ip in _KNOWN_BLOCKED_IPS:
+            log.info("[%s] %s:%d в списке заведомо заблокированных -- пропускаю "
+                     "прямую попытку, сразу через Cloudflare Worker", label, dst_ip, dst_port)
+            ws = await _connect_via_cf_worker(dst_ip, dst_port, label)
+            if ws is None:
+                return
+            try:
+                await _relay_over_cf_worker(reader, writer, ws, already_read, label)
+            finally:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+            return
 
         try:
             up_reader, up_writer = await asyncio.wait_for(
