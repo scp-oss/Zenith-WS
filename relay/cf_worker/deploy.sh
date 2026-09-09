@@ -88,7 +88,13 @@ command -v wrangler >/dev/null 2>&1 || {
 # файл может содержать чужие для этого скрипта переменные, не хотим
 # случайно исполнить что-то неожиданное из него.
 if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f "$ENV_FILE" ]; then
-  CLOUDFLARE_API_TOKEN="$(grep '^CLOUDFLARE_API_TOKEN=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+  # `|| true` -- живой баг 2026-09-09: под `set -o pipefail` пустой grep
+  # (переменная ещё ни разу не была записана в файл) отдаёт код ошибки,
+  # который ПРОТАСКИВАЕТСЯ через весь пайплайн даже когда tail/cut после
+  # него успешны -- под `set -e` это тихо убивает скрипт РОВНО на этой
+  # строке, без единого сообщения об ошибке (см. остальные три таких же
+  # места ниже -- тот же паттерн, тот же фикс).
+  CLOUDFLARE_API_TOKEN="$(grep '^CLOUDFLARE_API_TOKEN=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
   [ -n "$CLOUDFLARE_API_TOKEN" ] && echo "==> Использую CLOUDFLARE_API_TOKEN из кэша ($ENV_FILE)." >&2
 fi
 
@@ -114,8 +120,9 @@ cd "$SCRIPT_DIR"
 # этого скрипта.
 tg_worker_state="enabled"; wa_worker_state="enabled"
 if [ -f "$ENV_FILE" ]; then
-  tg_worker_state="$(grep '^ZWS_TELEGRAM_WORKER=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
-  wa_worker_state="$(grep '^ZWS_WHATSAPP_WORKER=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+  # `|| true` на обеих -- см. комментарий у первого такого места выше.
+  tg_worker_state="$(grep '^ZWS_TELEGRAM_WORKER=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
+  wa_worker_state="$(grep '^ZWS_WHATSAPP_WORKER=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
   [ -n "$tg_worker_state" ] || tg_worker_state="enabled"
   [ -n "$wa_worker_state" ] || wa_worker_state="enabled"
 fi
@@ -175,8 +182,9 @@ echo "==> Записано в $ENV_FILE (права 600 — там же тепе
 if [ "$SKIP_REDIRECT" = "0" ]; then
   tg_state="enabled"; wa_state="enabled"
   if [ -f "$ENV_FILE" ]; then
-    tg_state="$(grep '^ZWS_TELEGRAM_REDIRECT=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
-    wa_state="$(grep '^ZWS_WHATSAPP_REDIRECT=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+    # `|| true` на обеих -- см. комментарий у первого такого места выше.
+    tg_state="$(grep '^ZWS_TELEGRAM_REDIRECT=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
+    wa_state="$(grep '^ZWS_WHATSAPP_REDIRECT=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
     [ -n "$tg_state" ] || tg_state="enabled"
     [ -n "$wa_state" ] || wa_state="enabled"
   fi
