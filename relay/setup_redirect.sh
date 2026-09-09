@@ -25,10 +25,22 @@
 # должно стоять ПЕРЕД правилами REDIRECT.
 #
 # Использование:
-#   setup_redirect.sh apply [--port N] [--user NAME] [--cidr-file PATH]
-#   setup_redirect.sh remove [--port N] [--user NAME] [--cidr-file PATH]
-#   setup_redirect.sh enabled [--port N] [--cidr-file PATH]
+#   setup_redirect.sh apply [--port N] [--user NAME] [--cidr-file PATH] [--dports LIST]
+#   setup_redirect.sh remove [--port N] [--user NAME] [--cidr-file PATH] [--dports LIST]
+#   setup_redirect.sh enabled [--port N] [--cidr-file PATH] [--dports LIST]
 #   setup_redirect.sh status
+#
+# --dports (добавлено 2026-09-09, живой случай на Server A) -- список
+# портов назначения через запятую, ПО КАКИМ портам матчится REDIRECT
+# (по умолчанию "443"). Найдено при разборе "WhatsApp не отправляет
+# сообщения даже после того, как все известные заблокированные IP уже
+# в cidr-файле": изолированный tcpdump во время реальной отправки
+# показал, что нативное приложение держит постоянное соединение НЕ
+# только на 443, но и на 5222 (легаси always-on messaging порт) --
+# REDIRECT матчил только `--dport 443` безусловно, так что 5222-трафик
+# к тем же самым Meta-адресам вообще никогда не долетал до relay, уходил
+# напрямую и тонул на SYN-блэкхоле. Telegram эту опцию не использует
+# (остаётся дефолтным "443"), WhatsApp вызывается с `--dports 443,5222`.
 #
 # `enabled` (добавлено 2026-09-04, см. "Независимое включение/выключение
 # Telegram и WhatsApp" в CLAUDE.md) — код возврата 0/1, применён ли
@@ -68,6 +80,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CIDR_FILE="$SCRIPT_DIR/../cidr/telegram_ipv4.txt"
 PORT=8447
 RELAY_USER=wsrelay
+DPORTS_RAW=443
 ACTION="${1:-}"
 shift || true
 
@@ -76,6 +89,7 @@ while [ $# -gt 0 ]; do
     --port) PORT="$2"; shift 2 ;;
     --user) RELAY_USER="$2"; shift 2 ;;
     --cidr-file) CIDR_FILE="$2"; shift 2 ;;
+    --dports) DPORTS_RAW="$2"; shift 2 ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -84,6 +98,8 @@ done
 
 mapfile -t CIDRS < <(grep -vE '^\s*#|^\s*$' "$CIDR_FILE")
 [ "${#CIDRS[@]}" -gt 0 ] || { echo "$CIDR_FILE пуст -- нечего перенаправлять" >&2; exit 1; }
+
+IFS=',' read -ra DPORTS <<< "$DPORTS_RAW"
 
 case "$ACTION" in
   apply)
@@ -109,19 +125,23 @@ case "$ACTION" in
     # REDIRECT уже стоит с первой установки) дублирует каждое правило.
     # Дубли не ломают маршрутизацию (iptables матчит первое совпавшее),
     # но бесконтрольно раздувают таблицу NAT с каждым повторным apply.
-    for cidr in "${CIDRS[@]}"; do
-      if ! iptables -t nat -C OUTPUT -p tcp -d "$cidr" --dport 443 \
-          -j REDIRECT --to-port "$PORT" 2>/dev/null; then
-        iptables -t nat -A OUTPUT -p tcp -d "$cidr" --dport 443 \
-          -j REDIRECT --to-port "$PORT"
-      fi
+    for dport in "${DPORTS[@]}"; do
+      for cidr in "${CIDRS[@]}"; do
+        if ! iptables -t nat -C OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+            -j REDIRECT --to-port "$PORT" 2>/dev/null; then
+          iptables -t nat -A OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+            -j REDIRECT --to-port "$PORT"
+        fi
+      done
     done
-    echo "Применено: ${#CIDRS[@]} подсетей -> 127.0.0.1:$PORT (плюс исключение для $RELAY_USER)" >&2
+    echo "Применено: ${#CIDRS[@]} подсетей x ${#DPORTS[@]} портов (${DPORTS[*]}) -> 127.0.0.1:$PORT (плюс исключение для $RELAY_USER)" >&2
     ;;
   remove)
-    for cidr in "${CIDRS[@]}"; do
-      iptables -t nat -D OUTPUT -p tcp -d "$cidr" --dport 443 \
-        -j REDIRECT --to-port "$PORT" 2>/dev/null || true
+    for dport in "${DPORTS[@]}"; do
+      for cidr in "${CIDRS[@]}"; do
+        iptables -t nat -D OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+          -j REDIRECT --to-port "$PORT" 2>/dev/null || true
+      done
     done
     # Исключение self-loop общее на ВСЕ REDIRECT-правила (см. шапку файла
     # выше), не привязано к конкретному --cidr-file -- снимаем его ТОЛЬКО
@@ -143,13 +163,14 @@ case "$ACTION" in
     ;;
   enabled)
     first_cidr="${CIDRS[0]}"
-    iptables -t nat -C OUTPUT -p tcp -d "$first_cidr" --dport 443 -j REDIRECT --to-port "$PORT" 2>/dev/null
+    first_dport="${DPORTS[0]}"
+    iptables -t nat -C OUTPUT -p tcp -d "$first_cidr" --dport "$first_dport" -j REDIRECT --to-port "$PORT" 2>/dev/null
     ;;
   status)
     iptables -t nat -L OUTPUT -n -v --line-numbers | grep -E "REDIRECT|Chain OUTPUT"
     ;;
   *)
-    echo "Использование: $0 apply|remove|enabled|status [--port N]" >&2
+    echo "Использование: $0 apply|remove|enabled|status [--port N] [--dports LIST]" >&2
     exit 1
     ;;
 esac

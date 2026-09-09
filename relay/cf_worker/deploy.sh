@@ -189,8 +189,8 @@ if [ "$SKIP_REDIRECT" = "0" ]; then
   if [ "$wa_state" = "disabled" ]; then
     echo "==> WhatsApp REDIRECT пропущен (отмечен как выключенный в $ENV_FILE)." >&2
   else
-    echo "==> Применяю REDIRECT (WhatsApp)..." >&2
-    "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/whatsapp_ipv4.txt"
+    echo "==> Применяю REDIRECT (WhatsApp, порты 443+5222 -- см. CLAUDE.md 2026-09-09)..." >&2
+    "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/whatsapp_ipv4.txt" --dports 443,5222
   fi
 fi
 

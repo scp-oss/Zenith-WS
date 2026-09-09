@@ -1,14 +1,58 @@
 # Deliberately narrow, NOT Meta's full AS32934 (35 CIDR blocks, 500k+
 # addresses covering Facebook/Instagram/Messenger/Threads too) -- see
-# CLAUDE.md "WhatsApp SYN-blackhole, same class as Telegram" for the
-# full reasoning. Only the two prefixes actually containing the
-# confirmed-blocked WhatsApp endpoints (2026-09-01, `curl` from Server A:
-# TCP connect timeout, no reply, to both web.whatsapp.com=157.240.0.60
-# and static.whatsapp.net=31.13.72.52 -- same SYN null-route class as
-# Telegram's 149.154.160.0/20, not a DPI/SNI block). Prefixes sourced
-# from AS32934's own published RIR records (via ipregistry.co), not
-# guessed from the two IPs alone. Expand only with the same kind of
-# live evidence -- don't add more of AS32934 speculatively, unrelated
-# Facebook/Instagram traffic through here is unnecessary blast radius.
-157.240.0.0/17
-31.13.64.0/18
+# CLAUDE.md "Same fallback extended to WhatsApp" for the full reasoning.
+#
+# Narrowed 2026-09-08 (Server A) from the original two broad prefixes
+# (157.240.0.0/17 + 31.13.64.0/18) down to individual /32s -- those
+# prefixes also captured ordinary Instagram/Facebook traffic sharing the
+# same Meta ASN, and REDIRECT-ing that traffic away from
+# z2r_autobench's own already-working zapret2/RKN_TLS bypass broke
+# Instagram (iptables nat OUTPUT runs before zapret2's own mangle
+# POSTROUTING for locally-generated packets -- see z2r_autobench's own
+# CLAUDE.md publishing-hygiene section for the anonymized incident
+# writeup). Confirmed via live SNI capture (transparent_relay.py's own
+# diagnostic sniffer) while actually using WhatsApp side by side with
+# Instagram, both apps foregrounded in the same window:
+#
+#   edge-mqtt.facebook.com  -> 31.13.72.5    (notification/MQTT channel)
+#   graph.whatsapp.com      -> 31.13.72.52   (API/media)
+#   static.whatsapp.net     -> 31.13.72.52   (static assets, same IP)
+#   web.whatsapp.com        -> 157.240.0.60  (WhatsApp Web)
+#
+# Excluded (confirmed Instagram/Facebook in the same capture, already
+# working via zapret2/RKN_TLS -- do not add back): i.instagram.com/
+# graph.instagram.com (31.13.72.53), gateway.instagram.com (31.13.72.6),
+# test-gateway.instagram.com (31.13.72.142), graph.facebook.com
+# (31.13.72.8), www.instagram.com (31.13.72.174), www.facebook.com
+# (31.13.72.36).
+#
+# Added 2026-09-09 (Server A) -- two more real WhatsApp endpoints, found
+# by process of elimination after messages still failed to send even
+# with the four addresses above covered: an isolated tcpdump (every other
+# app closed, only new outbound SYNs) during a live, reproduced stuck
+# send showed these as the heaviest-hit real destinations, confirmed
+# SYN-blackholed the same way (`sudo -u wsrelay`, raw /dev/tcp, bypassing
+# REDIRECT so the relay's own self-loop exclusion doesn't mask the test):
+#
+#   31.13.72.48:443/5222 -> WhatsApp's own persistent connection (56 SYNs
+#                            in ~90s, by far the most contacted address in
+#                            the capture). Port 5222 is a legacy always-on
+#                            messaging port some WhatsApp client versions
+#                            still hold open -- REDIRECT only matches 443
+#                            by default (setup_redirect.sh --dports),
+#                            WhatsApp callers now pass `--dports 443,5222`
+#                            specifically so this doesn't silently miss
+#                            the 5222 leg again.
+#   157.240.200.61:443   -> another Meta/WhatsApp API edge
+#
+# Specific observed IPs, not subnets -- may need expansion if WhatsApp's
+# CDN/edge assigns different IPs later. Expand only with the same kind of
+# live evidence (isolated tcpdump + raw-TCP block confirmation), don't
+# guess. Prefixes originally sourced from AS32934's own published RIR
+# records (via ipregistry.co), individual host IPs sourced from live
+# capture.
+31.13.72.5/32
+31.13.72.48/32
+31.13.72.52/32
+157.240.0.60/32
+157.240.200.61/32
