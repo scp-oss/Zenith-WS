@@ -1,0 +1,16 @@
+[Unit]
+Description=Zenith-WS: синк + живая проверка внешнего списка RKN-заблокированных IP (см. cidr/rkn_ip_sync.sh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Требует root -- сам скрипт проверяет id -u и отказывается иначе (тест
+# каждого кандидата идёт через sudo -u wsrelay, в обход self-loop
+# исключения REDIRECT, см. cidr/rkn_ip_sync.sh и relay/setup_redirect.sh).
+# EnvironmentFile тот же общий файл, что уже хранит ZWS_MTPROXY_SECRET/
+# ZWS_CF_WORKER_SECRET и т.п. -- ZWS_RKN_SYNC_TIMEOUT/ZWS_RKN_SYNC_CONCURRENCY
+# (если заданы там) переопределяют дефолты скрипта (3с/20), без правки
+# самого юнита -- см. докстринг rkn_ip_sync.sh.
+EnvironmentFile=-/etc/z2r_autobench/wsrelay.env
+ExecStart=/usr/bin/bash /opt/Zenith-WS/cidr/rkn_ip_sync.sh

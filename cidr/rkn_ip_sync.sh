@@ -41,10 +41,22 @@
 # Использование:
 #   rkn_ip_sync.sh [--source-url URL] [--port N] [--timeout N] [--concurrency N] [--recheck-existing]
 #
+# Фоновый ночной запуск -- см. relay/rkn-ip-sync.service +
+# relay/rkn-ip-sync.timer (по умолчанию 03:00, +- 30 мин джиттер) --
+# прямой запрос "пусть это будет в фоне ночью", один прогон на большом
+# источнике не рассчитан на интерактивное ожидание (полчаса-пара часов).
+#
 # --recheck-existing -- по умолчанию уже подтверждённые в OUTPUT_FILE IP
 # повторно НЕ тестируются (экономия времени на большом источнике) -- этот
 # флаг заставляет перепроверить и их тоже (напр. раз в несколько недель,
 # вручную, не по расписанию -- IP мог перестать быть заблокированным).
+#
+# --timeout/--concurrency также читаются из окружения (ZWS_RKN_SYNC_TIMEOUT/
+# ZWS_RKN_SYNC_CONCURRENCY) ДО разбора аргументов -- CLI-флаг всё равно
+# главнее, если передан явно. Смысл: rkn-ip-sync.service (см. ниже) тянет
+# те же переменные из /etc/z2r_autobench/wsrelay.env через
+# EnvironmentFile=, так что таймаут/параллелизм ночного запуска настраивается
+# правкой ОДНОГО общего файла, без правки самого юнита или скрипта.
 #
 # Результат: cidr/rkn_ip_blocked.txt -- живой, накопленный список
 # подтверждённых IP (формат "1.2.3.4/32" на строку, тот же, что
@@ -72,8 +84,8 @@ OUTPUT_FILE="$SCRIPT_DIR/rkn_ip_blocked.txt"
 TELEGRAM_FILE="$SCRIPT_DIR/telegram_ipv4.txt"
 WHATSAPP_FILE="$SCRIPT_DIR/whatsapp_ipv4.txt"
 TEST_PORT=443
-TEST_TIMEOUT=3
-CONCURRENCY=20
+TEST_TIMEOUT="${ZWS_RKN_SYNC_TIMEOUT:-3}"
+CONCURRENCY="${ZWS_RKN_SYNC_CONCURRENCY:-20}"
 RECHECK_EXISTING=0
 WSRELAY_USER=wsrelay
 
