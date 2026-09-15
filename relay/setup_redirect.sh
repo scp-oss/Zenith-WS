@@ -25,10 +25,30 @@
 # должно стоять ПЕРЕД правилами REDIRECT.
 #
 # Использование:
-#   setup_redirect.sh apply [--port N] [--user NAME] [--cidr-file PATH] [--dports LIST]
-#   setup_redirect.sh remove [--port N] [--user NAME] [--cidr-file PATH] [--dports LIST]
-#   setup_redirect.sh enabled [--port N] [--cidr-file PATH] [--dports LIST]
+#   setup_redirect.sh apply [--port N] [--user NAME] [--cidr-file PATH] [--dports LIST] [--ipset NAME]
+#   setup_redirect.sh remove [--port N] [--user NAME] [--cidr-file PATH] [--dports LIST] [--ipset NAME]
+#   setup_redirect.sh enabled [--port N] [--cidr-file PATH] [--dports LIST] [--ipset NAME]
 #   setup_redirect.sh status
+#
+# --ipset NAME (добавлено 2026-09-15, для cidr/rkn_ip_blocked.txt) --
+# ОДНО REDIRECT-правило на весь список через `-m set --match-set NAME dst`
+# вместо одного `-A`+`-C` iptables-правила НА КАЖДУЮ строку файла. Без
+# этого apply/remove для telegram_ipv4.txt/whatsapp_ipv4.txt (единицы
+# записей) работает нормально, но rkn_ip_blocked.txt (тысячи живьём
+# подтверждённых IP, см. cidr/rkn_ip_sync.sh) на старом пути означало бы
+# тысячи отдельных iptables-команд, каждая с линейным сканом таблицы
+# ради своей же `-C`-проверки -- реально долго и раздувает NAT-таблицу.
+# Требует пакет `ipset` (apt install ipset, если ещё не стоит).
+# Содержимое сета заливается ОДНИМ `ipset restore` (batch), не циклом
+# `ipset add` -- на тысячах записей разница на порядок по времени.
+# Обновление уже применённого сета делает атомарный `ipset swap` через
+# временный сет-двойник -- живой REDIRECT никогда не видит пустой/
+# частично заполненный сет в процессе обновления (в отличие от голого
+# flush+refill, где есть окно с пустым сетом = временно ничего не
+# перенаправляется). `remove --ipset NAME` удаляет правило(-а) и сам сет;
+# без --ipset поведение apply/remove/enabled НЕ МЕНЯЕТСЯ ни для одного
+# существующего вызова (Telegram/WhatsApp остаются на старом,
+# по-CIDR-построчном пути, ничего у них не трогалось).
 #
 # --dports (добавлено 2026-09-09, живой случай на Server A) -- список
 # портов назначения через запятую, ПО КАКИМ портам матчится REDIRECT
@@ -81,6 +101,7 @@ CIDR_FILE="$SCRIPT_DIR/../cidr/telegram_ipv4.txt"
 PORT=8447
 RELAY_USER=wsrelay
 DPORTS_RAW=443
+IPSET_NAME=""
 ACTION="${1:-}"
 shift || true
 
@@ -90,9 +111,17 @@ while [ $# -gt 0 ]; do
     --user) RELAY_USER="$2"; shift 2 ;;
     --cidr-file) CIDR_FILE="$2"; shift 2 ;;
     --dports) DPORTS_RAW="$2"; shift 2 ;;
+    --ipset) IPSET_NAME="$2"; shift 2 ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
+
+if [ -n "$IPSET_NAME" ]; then
+  command -v ipset >/dev/null 2>&1 || {
+    echo "--ipset запрошен, но пакет ipset не установлен (apt install ipset)." >&2
+    exit 1
+  }
+fi
 
 [ -f "$CIDR_FILE" ] || { echo "Не найден $CIDR_FILE -- сначала запустите cidr/fetch_telegram_cidr.sh" >&2; exit 1; }
 
@@ -119,30 +148,74 @@ case "$ACTION" in
       echo "Пользователь $RELAY_USER не найден -- исключение self-loop НЕ применено, добавьте вручную после создания пользователя." >&2
     fi
 
-    # -C перед -A по той же причине, что и у exclusion выше -- без неё
-    # повторный apply того же файла (напр. cf_worker/deploy.sh вызывает
-    # apply безусловно на каждом запуске, в т.ч. на сервере, где Telegram
-    # REDIRECT уже стоит с первой установки) дублирует каждое правило.
-    # Дубли не ломают маршрутизацию (iptables матчит первое совпавшее),
-    # но бесконтрольно раздувают таблицу NAT с каждым повторным apply.
-    for dport in "${DPORTS[@]}"; do
-      for cidr in "${CIDRS[@]}"; do
-        if ! iptables -t nat -C OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+    if [ -n "$IPSET_NAME" ]; then
+      # Заливка ОДНИМ ipset restore (batch), не циклом ipset add -- на
+      # тысячах записей (cidr/rkn_ip_blocked.txt) разница на порядок по
+      # времени (один процесс вместо тысяч fork+exec). Обновление уже
+      # существующего сета -- через временный сет-двойник + `ipset swap`
+      # (атомарно на уровне ядра) вместо flush+refill "на живую" -- swap
+      # гарантирует, что уже применённое REDIRECT-правило ни на миг не
+      # увидит пустой/частично заполненный сет.
+      tmp_set="${IPSET_NAME}_tmp_$$"
+      ipset destroy "$tmp_set" 2>/dev/null || true
+      {
+        echo "create $tmp_set hash:net family inet maxelem 131072 -exist"
+        for cidr in "${CIDRS[@]}"; do
+          echo "add $tmp_set $cidr -exist"
+        done
+      } | ipset restore
+      ipset create "$IPSET_NAME" hash:net family inet maxelem 131072 -exist
+      ipset swap "$tmp_set" "$IPSET_NAME"
+      ipset destroy "$tmp_set" 2>/dev/null || true
+
+      # Одно REDIRECT-правило на порт, матчит ВЕСЬ сет через -m set --
+      # не растёт с размером файла, в отличие от per-CIDR пути ниже.
+      for dport in "${DPORTS[@]}"; do
+        if ! iptables -t nat -C OUTPUT -p tcp -m set --match-set "$IPSET_NAME" dst --dport "$dport" \
             -j REDIRECT --to-port "$PORT" 2>/dev/null; then
-          iptables -t nat -A OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+          iptables -t nat -A OUTPUT -p tcp -m set --match-set "$IPSET_NAME" dst --dport "$dport" \
             -j REDIRECT --to-port "$PORT"
         fi
       done
-    done
-    echo "Применено: ${#CIDRS[@]} подсетей x ${#DPORTS[@]} портов (${DPORTS[*]}) -> 127.0.0.1:$PORT (плюс исключение для $RELAY_USER)" >&2
+      echo "Применено (ipset $IPSET_NAME): ${#CIDRS[@]} адресов x ${#DPORTS[@]} портов (${DPORTS[*]}) -> 127.0.0.1:$PORT (плюс исключение для $RELAY_USER)" >&2
+    else
+      # -C перед -A по той же причине, что и у exclusion выше -- без неё
+      # повторный apply того же файла (напр. cf_worker/deploy.sh вызывает
+      # apply безусловно на каждом запуске, в т.ч. на сервере, где Telegram
+      # REDIRECT уже стоит с первой установки) дублирует каждое правило.
+      # Дубли не ломают маршрутизацию (iptables матчит первое совпавшее),
+      # но бесконтрольно раздувают таблицу NAT с каждым повторным apply.
+      for dport in "${DPORTS[@]}"; do
+        for cidr in "${CIDRS[@]}"; do
+          if ! iptables -t nat -C OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+              -j REDIRECT --to-port "$PORT" 2>/dev/null; then
+            iptables -t nat -A OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+              -j REDIRECT --to-port "$PORT"
+          fi
+        done
+      done
+      echo "Применено: ${#CIDRS[@]} подсетей x ${#DPORTS[@]} портов (${DPORTS[*]}) -> 127.0.0.1:$PORT (плюс исключение для $RELAY_USER)" >&2
+    fi
     ;;
   remove)
-    for dport in "${DPORTS[@]}"; do
-      for cidr in "${CIDRS[@]}"; do
-        iptables -t nat -D OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+    if [ -n "$IPSET_NAME" ]; then
+      for dport in "${DPORTS[@]}"; do
+        iptables -t nat -D OUTPUT -p tcp -m set --match-set "$IPSET_NAME" dst --dport "$dport" \
           -j REDIRECT --to-port "$PORT" 2>/dev/null || true
       done
-    done
+      # Сам сет можно удалить только когда на него не ссылается больше
+      # ни одно правило (иначе ядро откажет "resource busy") -- по
+      # построению мы только что убрали все правила выше, так что к
+      # этому моменту его уже ничего не держит.
+      ipset destroy "$IPSET_NAME" 2>/dev/null || true
+    else
+      for dport in "${DPORTS[@]}"; do
+        for cidr in "${CIDRS[@]}"; do
+          iptables -t nat -D OUTPUT -p tcp -d "$cidr" --dport "$dport" \
+            -j REDIRECT --to-port "$PORT" 2>/dev/null || true
+        done
+      done
+    fi
     # Исключение self-loop общее на ВСЕ REDIRECT-правила (см. шапку файла
     # выше), не привязано к конкретному --cidr-file -- снимаем его ТОЛЬКО
     # если после удаления списка выше REDIRECT-правил в nat OUTPUT не
@@ -162,15 +235,19 @@ case "$ACTION" in
     fi
     ;;
   enabled)
-    first_cidr="${CIDRS[0]}"
     first_dport="${DPORTS[0]}"
-    iptables -t nat -C OUTPUT -p tcp -d "$first_cidr" --dport "$first_dport" -j REDIRECT --to-port "$PORT" 2>/dev/null
+    if [ -n "$IPSET_NAME" ]; then
+      iptables -t nat -C OUTPUT -p tcp -m set --match-set "$IPSET_NAME" dst --dport "$first_dport" -j REDIRECT --to-port "$PORT" 2>/dev/null
+    else
+      first_cidr="${CIDRS[0]}"
+      iptables -t nat -C OUTPUT -p tcp -d "$first_cidr" --dport "$first_dport" -j REDIRECT --to-port "$PORT" 2>/dev/null
+    fi
     ;;
   status)
     iptables -t nat -L OUTPUT -n -v --line-numbers | grep -E "REDIRECT|Chain OUTPUT"
     ;;
   *)
-    echo "Использование: $0 apply|remove|enabled|status [--port N] [--dports LIST]" >&2
+    echo "Использование: $0 apply|remove|enabled|status [--port N] [--dports LIST] [--ipset NAME]" >&2
     exit 1
     ;;
 esac
