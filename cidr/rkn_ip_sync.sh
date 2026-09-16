@@ -145,7 +145,11 @@ echo "Источник: $total_lines строк всего, $candidates_total и
 
 comm -23 "$TMP_CANDIDATES" "$TMP_KNOWN" > "$TMP_NEW"
 new_count="$(wc -l < "$TMP_NEW" | tr -d ' ')"
-echo "Новых кандидатов для живой проверки: $new_count (порт $TEST_PORT, таймаут ${TEST_TIMEOUT}с, параллельно $CONCURRENCY)." >&2
+if [ "$RECHECK_EXISTING" -eq 1 ]; then
+  echo "Кандидатов на (пере)проверку: $new_count -- включая уже подтверждённые ранее (--recheck-existing), порт $TEST_PORT, таймаут ${TEST_TIMEOUT}с, параллельно $CONCURRENCY." >&2
+else
+  echo "Новых кандидатов для живой проверки: $new_count (порт $TEST_PORT, таймаут ${TEST_TIMEOUT}с, параллельно $CONCURRENCY)." >&2
+fi
 
 if [ "$new_count" -eq 0 ]; then
   echo "Нечего проверять -- либо источник не изменился, либо всё уже покрыто." >&2
@@ -180,9 +184,21 @@ done < "$TMP_NEW"
 wait
 
 blocked_count="$(wc -l < "$TMP_RESULTS" | tr -d ' ')"
-echo "Проверка завершена: $blocked_count из $new_count новых кандидатов подтверждённо недоступны (SYN-таймаут на порт $TEST_PORT)." >&2
+if [ "$RECHECK_EXISTING" -eq 1 ]; then
+  echo "Проверка завершена: $blocked_count из $new_count (пере)проверенных подтверждённо недоступны (SYN-таймаут на порт $TEST_PORT)." >&2
+else
+  echo "Проверка завершена: $blocked_count из $new_count новых кандидатов подтверждённо недоступны (SYN-таймаут на порт $TEST_PORT)." >&2
+fi
 
-if [ "$blocked_count" -eq 0 ]; then
+# Живой баг 2026-09-16: раньше при blocked_count=0 скрипт выходил тут же,
+# НЕ трогая OUTPUT_FILE вообще -- под --recheck-existing это означало, что
+# полная перепроверка, честно не подтвердившая НИ ОДНОГО кандидата
+# (например, все старые записи оказались ложными срабатываниями), не
+# могла очистить файл -- тот же баг класса "может только расти", что и
+# сам merge-режим ниже. Теперь ранний выход -- только для обычного
+# инкрементального режима (там действительно нечего менять, IPс просто
+# нет новых подтверждений поверх уже накопленного).
+if [ "$blocked_count" -eq 0 ] && [ "$RECHECK_EXISTING" -eq 0 ]; then
   echo "Ни один новый кандидат не подтвердился как заблокированный -- $OUTPUT_FILE не менялся." >&2
   exit 0
 fi
@@ -198,13 +214,31 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
   echo "# источника без проверки). Источник кандидатов: $SOURCE_URL"
   echo "# Последнее обновление: $(date -u '+%Y-%m-%d %H:%M UTC')"
 } > "$OUTPUT_FILE.new"
-{
-  [ -f "$OUTPUT_FILE" ] && grep -vE '^\s*#|^\s*$' "$OUTPUT_FILE"
-  cat "$TMP_RESULTS"
-} 2>/dev/null | sort -u >> "$OUTPUT_FILE.new"
+if [ "$RECHECK_EXISTING" -eq 1 ]; then
+  # Живой баг 2026-09-16: --recheck-existing тестирует ВСЕ кандидаты
+  # (включая уже подтверждённые ранее, см. TMP_KNOWN выше -- под этим
+  # флагом OUTPUT_FILE туда не идёт), но старая версия этого блока всё
+  # равно ОБЪЕДИНЯЛА новый результат со старым содержимым файла вместо
+  # того, чтобы заменить его -- то есть IP, переставший отвечать
+  # SYN-таймаутом при перепроверке, никогда бы не пропал из файла.
+  # Перепроверка, которая может только расти, а не сжиматься -- не
+  # перепроверка. Теперь при --recheck-existing файл ПОЛНОСТЬЮ
+  # перезаписывается тем, что подтвердилось именно в этом прогоне --
+  # никакого merge со старым содержимым.
+  sort -u "$TMP_RESULTS" 2>/dev/null >> "$OUTPUT_FILE.new"
+else
+  {
+    [ -f "$OUTPUT_FILE" ] && grep -vE '^\s*#|^\s*$' "$OUTPUT_FILE"
+    cat "$TMP_RESULTS"
+  } 2>/dev/null | sort -u >> "$OUTPUT_FILE.new"
+fi
 mv "$OUTPUT_FILE.new" "$OUTPUT_FILE"
 
-echo "Дописано $blocked_count новых подтверждённых IP в $OUTPUT_FILE." >&2
+if [ "$RECHECK_EXISTING" -eq 1 ]; then
+  echo "$OUTPUT_FILE полностью пересобран по результатам этой перепроверки: $blocked_count подтверждённых IP (было -- смотри предыдущую версию в git/бэкапе, если нужно сравнить)." >&2
+else
+  echo "Дописано $blocked_count новых подтверждённых IP в $OUTPUT_FILE." >&2
+fi
 echo "Это НЕ применяет REDIRECT само по себе -- следующий шаг вручную:" >&2
 echo "  relay/setup_redirect.sh apply --cidr-file $OUTPUT_FILE --dports $TEST_PORT" >&2
 echo "(при большом количестве записей это может быть медленно/раздувать" >&2
