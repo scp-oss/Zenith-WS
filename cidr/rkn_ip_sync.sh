@@ -110,13 +110,16 @@ id "$WSRELAY_USER" >/dev/null 2>&1 || {
   exit 1
 }
 command -v curl >/dev/null 2>&1 || { echo "curl не найден" >&2; exit 1; }
+# Нужен для корректного CIDR-исключения ниже (telegram_ipv4.txt содержит
+# широкие диапазоны, не только /32 -- точное совпадение строки, которое
+# было тут раньше, их не покрывало, см. коммит, который это исправил).
+command -v python3 >/dev/null 2>&1 || { echo "python3 не найден" >&2; exit 1; }
 
 TMP_RAW="$(mktemp)"
 TMP_CANDIDATES="$(mktemp)"
-TMP_KNOWN="$(mktemp)"
 TMP_NEW="$(mktemp)"
 TMP_RESULTS="$(mktemp)"
-trap 'rm -f "$TMP_RAW" "$TMP_CANDIDATES" "$TMP_KNOWN" "$TMP_NEW" "$TMP_RESULTS"' EXIT
+trap 'rm -f "$TMP_RAW" "$TMP_CANDIDATES" "$TMP_NEW" "$TMP_RESULTS"' EXIT
 
 echo "Скачиваю $SOURCE_URL..." >&2
 if ! curl -fsS --max-time 30 -o "$TMP_RAW" "$SOURCE_URL"; then
@@ -135,15 +138,62 @@ echo "Источник: $total_lines строк всего, $candidates_total и
 
 # Уже известные (Telegram/WhatsApp кураторские списки + уже подтверждённые
 # этим же скриптом ранее) -- не тестируем их снова здесь без необходимости.
-{
-  [ -f "$TELEGRAM_FILE" ] && grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$TELEGRAM_FILE"
-  [ -f "$WHATSAPP_FILE" ] && grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$WHATSAPP_FILE"
-  if [ "$RECHECK_EXISTING" -eq 0 ] && [ -f "$OUTPUT_FILE" ]; then
-    grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$OUTPUT_FILE"
-  fi
-} 2>/dev/null | sort -u > "$TMP_KNOWN"
+#
+# Живой баг 2026-09-16, найден при ручной проверке пересечений с
+# telegram_ipv4.txt/whatsapp_ipv4.txt: раньше это исключение делалось
+# через `grep -oE` (вытаскивал только голый адрес сети из каждой строки)
+# + `comm -23` (точное совпадение строки). Для whatsapp_ipv4.txt (там
+# только /32) это работало, но telegram_ipv4.txt по-прежнему хранит
+# широкие диапазоны (`149.154.160.0/20` и т.п.) -- точное совпадение
+# ловило только сам адрес сети (`149.154.160.0`), а не остальные ~4000
+# адресов внутри того же /20. Кандидат из внешнего RKN-источника,
+# попадающий ВНУТРЬ такого диапазона, но не совпадающий с ним побайтово,
+# проходил бы мимо исключения и тестировался/добавлялся бы заново --
+# безобидно с точки зрения REDIRECT (то же самое место назначения всё
+# равно накрывается диапазоном Telegram), но бессмысленно дублирует
+# работу и раздувает rkn_ip_blocked.txt повторами. Теперь настоящее
+# CIDR-вхождение через python3's ipaddress -- через переменные окружения,
+# не подстановку путей прямо в текст python-скрипта (не хотим, чтобы
+# путь с спецсимволом сломал синтаксис или что-то похуже).
+RKN_KNOWN_RECHECK="$RECHECK_EXISTING" \
+RKN_TELEGRAM_FILE="$TELEGRAM_FILE" \
+RKN_WHATSAPP_FILE="$WHATSAPP_FILE" \
+RKN_OUTPUT_FILE="$OUTPUT_FILE" \
+RKN_CANDIDATES_FILE="$TMP_CANDIDATES" \
+python3 <<'PYEOF' > "$TMP_NEW"
+import ipaddress
+import os
 
-comm -23 "$TMP_CANDIDATES" "$TMP_KNOWN" > "$TMP_NEW"
+def load_networks(paths):
+    nets = []
+    for path in paths:
+        if not path or not os.path.isfile(path):
+            continue
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                try:
+                    nets.append(ipaddress.ip_network(line, strict=False))
+                except ValueError:
+                    pass
+    return nets
+
+known_paths = [os.environ['RKN_TELEGRAM_FILE'], os.environ['RKN_WHATSAPP_FILE']]
+if os.environ['RKN_KNOWN_RECHECK'] == '0':
+    known_paths.append(os.environ['RKN_OUTPUT_FILE'])
+known = load_networks(known_paths)
+
+with open(os.environ['RKN_CANDIDATES_FILE']) as f:
+    for line in f:
+        ip_str = line.strip()
+        if not ip_str:
+            continue
+        ip = ipaddress.ip_address(ip_str)
+        if not any(ip in net for net in known):
+            print(ip_str)
+PYEOF
 new_count="$(wc -l < "$TMP_NEW" | tr -d ' ')"
 if [ "$RECHECK_EXISTING" -eq 1 ]; then
   echo "Кандидатов на (пере)проверку: $new_count -- включая уже подтверждённые ранее (--recheck-existing), порт $TEST_PORT, таймаут ${TEST_TIMEOUT}с, параллельно $CONCURRENCY." >&2
@@ -216,8 +266,9 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 } > "$OUTPUT_FILE.new"
 if [ "$RECHECK_EXISTING" -eq 1 ]; then
   # Живой баг 2026-09-16: --recheck-existing тестирует ВСЕ кандидаты
-  # (включая уже подтверждённые ранее, см. TMP_KNOWN выше -- под этим
-  # флагом OUTPUT_FILE туда не идёт), но старая версия этого блока всё
+  # (включая уже подтверждённые ранее -- под этим флагом OUTPUT_FILE не
+  # идёт в список исключений известных IP выше), но старая версия этого
+  # блока всё
   # равно ОБЪЕДИНЯЛА новый результат со старым содержимым файла вместо
   # того, чтобы заменить его -- то есть IP, переставший отвечать
   # SYN-таймаутом при перепроверке, никогда бы не пропал из файла.
