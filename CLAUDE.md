@@ -10,6 +10,46 @@ codename per real server/provider, same convention as z2r_autobench's own
 CLAUDE.md (2026-08-26: retroactively scrubbed a real hostname that had
 crept in here to this codename).
 
+## Rule: one Cloudflare Worker per server, never shared (since 2026-09-25)
+
+- `cf_worker/wrangler.toml`'s `name = "zenith-ws-relay"` is currently
+  the SAME literal string in every checkout of this repo — a Worker in
+  Cloudflare is identified by name within an account, not by which
+  server ran `wrangler deploy`. Two servers sharing one Cloudflare
+  account/token and deploying from this same checkout therefore
+  deploy to the exact same Worker, whether they mean to or not.
+- Live incident, Server A + Server B: Server B was walked through
+  first-time Worker setup (z0r item 14 → 3 → 4/5) using the SAME
+  Cloudflare token already cached on Server A. A confusing status
+  default in `_wsrelay_worker_status()` (an untouched toggle key reads
+  as "already ON" once any Worker exists) led to an accidental
+  disable-toggle on Server B, which pushed `ALLOW_TELEGRAM/
+  ALLOW_WHATSAPP="false"` to the shared Worker AND rotated
+  `RELAY_SECRET` (every deploy generates a fresh one by design) —
+  breaking `web.telegram.org`/`web.WhatsApp` on Server A, which had
+  been working fine and hadn't touched anything itself. Took several
+  rounds of cross-server secret-sync + re-diagnosis (403 → fixed
+  secret → still 400 "dst not in allowed Telegram ranges" → found the
+  toggle) before the actual shared-resource nature of the problem was
+  identified.
+- **Fix applied operationally, not yet in code**: Server B's Worker
+  env vars (`ZWS_CF_WORKER_HOST`/`ZWS_CF_WORKER_SECRET`/
+  `ZWS_TELEGRAM_WORKER`/`ZWS_WHATSAPP_WORKER`) were deleted from its
+  own `wsrelay.env` — it no longer touches the Worker at all, only its
+  own local REDIRECT (independent, iptables-only, no shared state).
+  Server A redeployed itself with the correct flags, restoring service.
+  **Neither "two API tokens" nor "no RELAY_SECRET" would have fixed
+  this** — the collision is on Worker *name* within one account, not
+  on which token authenticates the deploy, and the secret is an
+  unrelated (real) anti-abuse control, not the actual cause.
+- **Not yet fixed at the code level**: `deploy.sh` should derive a
+  per-server-unique Worker name (e.g. a suffix cached once per server,
+  same idiom as the already-per-server `RELAY_SECRET`) instead of the
+  fixed `zenith-ws-relay`, so this class of collision becomes
+  structurally impossible instead of something that has to be
+  remembered. Flagged here, deliberately deferred — pick up next time
+  this file is touched for Worker-related work.
+
 ## Android MTProto investigation (started 2026-08-22)
 
 **Status: ROOT CAUSE FOUND 2026-08-28, fix shipped, NOT YET LIVE-VERIFIED.**
