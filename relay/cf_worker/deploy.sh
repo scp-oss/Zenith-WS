@@ -155,8 +155,21 @@ grep -q '^ALLOW_META_WEB = ' wrangler.toml || printf '\nALLOW_META_WEB = "false"
 sed -i "s/^ALLOW_META_WEB = .*/ALLOW_META_WEB = \"$mw_var\"/" wrangler.toml
 echo "==> Воркер: web.telegram.org=$tg_worker_state, web.WhatsApp=$wa_worker_state, веб-Instagram/Facebook=$mw_worker_state" >&2
 
-echo "==> Деплой воркера (wrangler deploy)..." >&2
-DEPLOY_OUT="$(wrangler deploy 2>&1)" || { echo "$DEPLOY_OUT" >&2; exit 1; }
+# Имя воркера -- СВОЁ на каждый сервер (2026-11-13). Раньше все серверы
+# деплоили один и тот же "zenith-ws-relay" (из wrangler.toml) в общий
+# аккаунт Cloudflare, а деплой каждый раз генерирует новый RELAY_SECRET --
+# деплой со второго сервера (стенд МТС) молча ломал первый (403 на всех
+# соединениях через воркер). Сервер, у которого воркер уже есть
+# (ZWS_CF_WORKER_HOST в $ENV_FILE), сохраняет прежнее имя; новый получает
+# zenith-ws-relay-<hostname>. Переопределение: ZWS_WORKER_NAME.
+WORKER_NAME="${ZWS_WORKER_NAME:-}"
+if [ -z "$WORKER_NAME" ] && [ -f "$ENV_FILE" ]; then
+  _prev_host="$(grep '^ZWS_CF_WORKER_HOST=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
+  [ -n "$_prev_host" ] && WORKER_NAME="${_prev_host%%.*}"
+fi
+[ -n "$WORKER_NAME" ] || WORKER_NAME="zenith-ws-relay-$(hostname -s | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-')"
+echo "==> Деплой воркера $WORKER_NAME (wrangler deploy)..." >&2
+DEPLOY_OUT="$(wrangler deploy --name "$WORKER_NAME" 2>&1)" || { echo "$DEPLOY_OUT" >&2; exit 1; }
 echo "$DEPLOY_OUT" >&2
 
 WORKER_HOST="$(printf '%s\n' "$DEPLOY_OUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1 | sed 's#^https://##')"
@@ -169,7 +182,7 @@ echo "==> Воркер: https://$WORKER_HOST" >&2
 
 echo "==> Генерирую новый RELAY_SECRET (свой на этот сервер, не переиспользуется)..." >&2
 SECRET="$(openssl rand -hex 32)"
-printf '%s' "$SECRET" | wrangler secret put RELAY_SECRET >&2
+printf '%s' "$SECRET" | wrangler secret put RELAY_SECRET --name "$WORKER_NAME" >&2
 
 # Идемпотентная запись в env-файл -- та же sed-или-append схема, что
 # z0r уже использует для ZENITH_PROFILES и т.п. (см. z2r_autobench/z0r).
