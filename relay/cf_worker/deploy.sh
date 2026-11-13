@@ -143,10 +143,33 @@ tg_var="true"; [ "$tg_worker_state" = "disabled" ] && tg_var="false"
 wa_var="true"; [ "$wa_worker_state" = "disabled" ] && wa_var="false"
 sed -i "s/^ALLOW_TELEGRAM = .*/ALLOW_TELEGRAM = \"$tg_var\"/" wrangler.toml
 sed -i "s/^ALLOW_WHATSAPP = .*/ALLOW_WHATSAPP = \"$wa_var\"/" wrangler.toml
-echo "==> Воркер: web.telegram.org=$tg_worker_state, web.WhatsApp=$wa_worker_state" >&2
+# Веб-Instagram/Facebook (2026-11-13) -- по умолчанию ВЫКЛЮЧЕН, включается
+# ZWS_META_WEB_WORKER=enabled в $ENV_FILE.
+mw_worker_state="disabled"
+if [ -f "$ENV_FILE" ]; then
+  mw_worker_state="$(grep '^ZWS_META_WEB_WORKER=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
+  [ -n "$mw_worker_state" ] || mw_worker_state="disabled"
+fi
+mw_var="false"; [ "$mw_worker_state" = "enabled" ] && mw_var="true"
+grep -q '^ALLOW_META_WEB = ' wrangler.toml || printf '\nALLOW_META_WEB = "false"\n' >> wrangler.toml
+sed -i "s/^ALLOW_META_WEB = .*/ALLOW_META_WEB = \"$mw_var\"/" wrangler.toml
+echo "==> Воркер: web.telegram.org=$tg_worker_state, web.WhatsApp=$wa_worker_state, веб-Instagram/Facebook=$mw_worker_state" >&2
 
-echo "==> Деплой воркера (wrangler deploy)..." >&2
-DEPLOY_OUT="$(wrangler deploy 2>&1)" || { echo "$DEPLOY_OUT" >&2; exit 1; }
+# Имя воркера -- СВОЁ на каждый сервер (2026-11-13). Раньше все серверы
+# деплоили один и тот же "zenith-ws-relay" (из wrangler.toml) в общий
+# аккаунт Cloudflare, а деплой каждый раз генерирует новый RELAY_SECRET --
+# деплой со второго сервера (стенд МТС) молча ломал первый (403 на всех
+# соединениях через воркер). Сервер, у которого воркер уже есть
+# (ZWS_CF_WORKER_HOST в $ENV_FILE), сохраняет прежнее имя; новый получает
+# zenith-ws-relay-<hostname>. Переопределение: ZWS_WORKER_NAME.
+WORKER_NAME="${ZWS_WORKER_NAME:-}"
+if [ -z "$WORKER_NAME" ] && [ -f "$ENV_FILE" ]; then
+  _prev_host="$(grep '^ZWS_CF_WORKER_HOST=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
+  [ -n "$_prev_host" ] && WORKER_NAME="${_prev_host%%.*}"
+fi
+[ -n "$WORKER_NAME" ] || WORKER_NAME="zenith-ws-relay-$(hostname -s | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-')"
+echo "==> Деплой воркера $WORKER_NAME (wrangler deploy)..." >&2
+DEPLOY_OUT="$(wrangler deploy --name "$WORKER_NAME" 2>&1)" || { echo "$DEPLOY_OUT" >&2; exit 1; }
 echo "$DEPLOY_OUT" >&2
 
 WORKER_HOST="$(printf '%s\n' "$DEPLOY_OUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1 | sed 's#^https://##')"
@@ -159,7 +182,7 @@ echo "==> Воркер: https://$WORKER_HOST" >&2
 
 echo "==> Генерирую новый RELAY_SECRET (свой на этот сервер, не переиспользуется)..." >&2
 SECRET="$(openssl rand -hex 32)"
-printf '%s' "$SECRET" | wrangler secret put RELAY_SECRET >&2
+printf '%s' "$SECRET" | wrangler secret put RELAY_SECRET --name "$WORKER_NAME" >&2
 
 # Идемпотентная запись в env-файл -- та же sed-или-append схема, что
 # z0r уже использует для ZENITH_PROFILES и т.п. (см. z2r_autobench/z0r).
@@ -212,6 +235,17 @@ if [ "$SKIP_REDIRECT" = "0" ]; then
   else
     echo "==> Применяю REDIRECT (WhatsApp, порты 443+5222 -- см. CLAUDE.md 2026-09-09)..." >&2
     "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/whatsapp_ipv4.txt" --dports 443,5222
+  fi
+  mw_state="disabled"
+  if [ -f "$ENV_FILE" ]; then
+    mw_state="$(grep '^ZWS_META_WEB_REDIRECT=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
+    [ -n "$mw_state" ] || mw_state="disabled"
+  fi
+  if [ "$mw_state" = "enabled" ]; then
+    echo "==> Применяю REDIRECT (веб-Instagram/Facebook, cidr/meta_web_ipv4.txt)..." >&2
+    "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/meta_web_ipv4.txt" --dports 443
+  else
+    echo "==> REDIRECT веб-Instagram/Facebook выключен (ZWS_META_WEB_REDIRECT в $ENV_FILE != enabled)." >&2
   fi
 fi
 

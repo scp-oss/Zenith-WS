@@ -65,6 +65,25 @@ const WHATSAPP_CIDRS = [
   '157.240.200.61/32',
 ];
 
+// Веб-Instagram / веб-Facebook (2026-11-13, ALLOW_META_WEB): основные
+// подсети Meta (AS32934). Сюда попадает только то, что relay сам решил
+// провести через Worker (REDIRECT -- cidr/meta_web_ipv4.txt, и лишь когда
+// прямое соединение не прошло), поэтому широкий список тут не «заворачивает»
+// рабочий трафик -- он лишь ограничивает, КУДА Worker вообще готов
+// подключаться. Пересекается с WHATSAPP_CIDRS -- это нормально, проверки
+// независимы (каждый сервис включается своим флагом).
+const META_WEB_CIDRS = [
+  '31.13.64.0/18',
+  '157.240.0.0/16',
+  '179.60.192.0/22',
+  '185.60.216.0/22',
+  '69.171.224.0/19',
+  '66.220.144.0/20',
+  '173.252.64.0/18',
+  '129.134.0.0/16',
+  '163.70.128.0/17',
+];
+
 function ipToInt(ip) {
   const parts = ip.split('.').map(Number);
   if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return null;
@@ -92,6 +111,10 @@ function ipInCidr(ip, cidr) {
 function isAllowedDst(ip, env) {
   if (env.ALLOW_TELEGRAM !== 'false' && TELEGRAM_CIDRS.some((cidr) => ipInCidr(ip, cidr))) return true;
   if (env.ALLOW_WHATSAPP !== 'false' && WHATSAPP_CIDRS.some((cidr) => ipInCidr(ip, cidr))) return true;
+  // Новый сервис -- по умолчанию ВЫКЛЮЧЕН (в отличие от двух старых):
+  // включается только явным ALLOW_META_WEB = "true" (deploy.sh), чтобы
+  // уже развёрнутые воркеры не начали молча пускать трафик Meta.
+  if (env.ALLOW_META_WEB === 'true' && META_WEB_CIDRS.some((cidr) => ipInCidr(ip, cidr))) return true;
   return false;
 }
 
@@ -106,7 +129,7 @@ export default {
       return new Response('forbidden', { status: 403 });
     }
     if (!isAllowedDst(dst, env)) {
-      return new Response('dst not in allowed Telegram ranges', { status: 400 });
+      return new Response('dst not in allowed ranges', { status: 400 });
     }
     if (!(port > 0 && port < 65536)) {
       return new Response('bad port', { status: 400 });

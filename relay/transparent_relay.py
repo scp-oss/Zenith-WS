@@ -168,6 +168,56 @@ _KNOWN_BLOCKED_IPS = frozenset({
 })
 
 
+# IP, до которых прямая попытка только что провалилась (2026-11-13, веб-
+# Instagram/Facebook: страница открывает десятки соединений к одним и тем же
+# заблокированным адресам 31.13.72.x -- ждать PASSTHROUGH_DIRECT_TIMEOUT на
+# КАЖДОМ значит грузить страницу минутами). Запоминаем на LEARNED_BLOCKED_TTL
+# и следующие соединения к ним сразу ведём через Worker; по истечении TTL
+# снова пробуем напрямую (блокировки меняются).
+LEARNED_BLOCKED_TTL = float(os.environ.get('ZWS_LEARNED_BLOCKED_TTL', '1800'))
+_learned_blocked: Dict[str, float] = {}
+
+
+# Подсети веб-Instagram/Facebook (cidr/meta_web_ipv4.txt): у части адресов
+# TCP открыт, но TLS тут же рвёт DPI (31.13.72.36 www.facebook.com:
+# ERR_CONNECTION_CLOSED) -- passthrough считает такое соединение удачным и в
+# Worker не переключается. Поэтому по умолчанию весь этот диапазон -- сразу
+# через Worker (ZWS_META_WEB_VIA_WORKER=always); =fallback -- как у прочих
+# (сначала напрямую).
+META_WEB_VIA_WORKER = os.environ.get('ZWS_META_WEB_VIA_WORKER', 'always')
+_META_WEB_NETS = []
+try:
+    import ipaddress as _ipaddress
+    _mw_file = Path(__file__).resolve().parent.parent / 'cidr' / 'meta_web_ipv4.txt'
+    if _mw_file.exists() and os.environ.get('ZWS_META_WEB_REDIRECT', 'disabled') == 'enabled':
+        for _ln in _mw_file.read_text().splitlines():
+            _ln = _ln.strip()
+            if _ln and not _ln.startswith('#'):
+                _META_WEB_NETS.append(_ipaddress.ip_network(_ln, strict=False))
+except Exception:
+    _META_WEB_NETS = []
+
+
+def _is_meta_web_forced(ip: str) -> bool:
+    if META_WEB_VIA_WORKER != 'always' or not _META_WEB_NETS:
+        return False
+    try:
+        a = _ipaddress.ip_address(ip)
+    except Exception:
+        return False
+    return any(a in n for n in _META_WEB_NETS)
+
+
+def _is_learned_blocked(ip: str) -> bool:
+    exp = _learned_blocked.get(ip)
+    if exp is None:
+        return False
+    if exp < time.monotonic():
+        _learned_blocked.pop(ip, None)
+        return False
+    return True
+
+
 # Единственные DC, которые реально существуют у Telegram -- 1-5, плюс
 # те же номера +10000 для тестовой среды (см. is_test_dc в
 # _handle_client). Всё остальное НЕ может быть настоящим клиентом.
@@ -398,7 +448,7 @@ async def _passthrough_plain_tcp(reader: asyncio.StreamReader, writer: asyncio.S
         # См. _KNOWN_BLOCKED_IPS выше -- для этих IP прямая попытка ГАРАНТИРОВАННО
         # проваливается (уже подтверждено), тратить на неё PASSTHROUGH_DIRECT_TIMEOUT
         # смысла нет, только задерживает переключение на рабочий Worker fallback.
-        if dst_ip in _KNOWN_BLOCKED_IPS:
+        if dst_ip in _KNOWN_BLOCKED_IPS or _is_learned_blocked(dst_ip) or _is_meta_web_forced(dst_ip):
             log.info("[%s] %s:%d в списке заведомо заблокированных -- пропускаю "
                      "прямую попытку, сразу через Cloudflare Worker", label, dst_ip, dst_port)
             ws = await _connect_via_cf_worker(dst_ip, dst_port, label)
@@ -422,6 +472,7 @@ async def _passthrough_plain_tcp(reader: asyncio.StreamReader, writer: asyncio.S
                 asyncio.open_connection(dst_ip, dst_port), timeout=PASSTHROUGH_DIRECT_TIMEOUT)
         except Exception as exc:
             log.warning("[%s] passthrough к %s:%d не удался: %s", label, dst_ip, dst_port, exc)
+            _learned_blocked[dst_ip] = time.monotonic() + LEARNED_BLOCKED_TTL
             ws = await _connect_via_cf_worker(dst_ip, dst_port, label)
             if ws is None:
                 return

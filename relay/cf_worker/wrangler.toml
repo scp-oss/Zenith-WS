@@ -17,3 +17,6 @@ compatibility_date = "2024-09-23"
 [vars]
 ALLOW_TELEGRAM = "true"
 ALLOW_WHATSAPP = "true"
+# ALLOW_META_WEB -- веб-Instagram/веб-Facebook (2026-11-13), по умолчанию выключен;
+# deploy.sh переписывает по ZWS_META_WEB_WORKER из wsrelay.env.
+ALLOW_META_WEB = "false"

@@ -1,0 +1,11 @@
+# Веб-Instagram / веб-Facebook (2026-11-13, NETH-4 / Дом.ру): часть адресов Meta
+# в 31.13.64.0/18 закрыта уже на уровне TCP (SYN не проходит, zapret2 бессилен):
+#   31.13.72.174 www.instagram.com, 31.13.88.174 instagram.com,
+#   31.13.72.53 i.instagram.com / *.cdninstagram.com / graph.instagram.com,
+#   31.13.72.12 static.xx.fbcdn.net / connect.facebook.net, 31.13.72.8 web.facebook.com.
+# Другие адреса того же диапазона открыты (31.13.72.36 facebook.com, .175) --
+# поэтому REDIRECT всего /18 на relay: он сначала пробует напрямую (через
+# zapret2), при неудаче -- через Cloudflare Worker (ALLOW_META_WEB), и
+# запоминает такие IP (см. transparent_relay._learned_blocked).
+# 157.240.0.0/16 намеренно НЕ здесь: почти весь открыт напрямую.
+31.13.64.0/18
