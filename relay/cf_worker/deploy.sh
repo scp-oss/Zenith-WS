@@ -141,8 +141,16 @@ if [ -f "$ENV_FILE" ]; then
 fi
 tg_var="true"; [ "$tg_worker_state" = "disabled" ] && tg_var="false"
 wa_var="true"; [ "$wa_worker_state" = "disabled" ] && wa_var="false"
-sed -i "s/^ALLOW_TELEGRAM = .*/ALLOW_TELEGRAM = \"$tg_var\"/" wrangler.toml
-sed -i "s/^ALLOW_WHATSAPP = .*/ALLOW_WHATSAPP = \"$wa_var\"/" wrangler.toml
+# Состояние сервера (ALLOW_*) пишем НЕ в отслеживаемый wrangler.toml, а в его
+# копию wrangler.generated.toml (в .gitignore), и деплоим с ней (-c). Раньше
+# sed правил wrangler.toml в репозитории -- на каждом сервере после деплоя
+# висела локальная правка, и автообновление (git pull --ff-only) упиралось в
+# неё (NETH-4, 2026-11-13). Состояние по-прежнему видно в файле, просто в
+# неотслеживаемом.
+WRANGLER_CFG=wrangler.generated.toml
+cp -f wrangler.toml "$WRANGLER_CFG"
+sed -i "s/^ALLOW_TELEGRAM = .*/ALLOW_TELEGRAM = \"$tg_var\"/" "$WRANGLER_CFG"
+sed -i "s/^ALLOW_WHATSAPP = .*/ALLOW_WHATSAPP = \"$wa_var\"/" "$WRANGLER_CFG"
 # Веб-Instagram/Facebook (2026-11-13) -- по умолчанию ВЫКЛЮЧЕН, включается
 # ZWS_META_WEB_WORKER=enabled в $ENV_FILE.
 mw_worker_state="disabled"
@@ -151,8 +159,8 @@ if [ -f "$ENV_FILE" ]; then
   [ -n "$mw_worker_state" ] || mw_worker_state="disabled"
 fi
 mw_var="false"; [ "$mw_worker_state" = "enabled" ] && mw_var="true"
-grep -q '^ALLOW_META_WEB = ' wrangler.toml || printf '\nALLOW_META_WEB = "false"\n' >> wrangler.toml
-sed -i "s/^ALLOW_META_WEB = .*/ALLOW_META_WEB = \"$mw_var\"/" wrangler.toml
+grep -q '^ALLOW_META_WEB = ' "$WRANGLER_CFG" || printf '\nALLOW_META_WEB = "false"\n' >> "$WRANGLER_CFG"
+sed -i "s/^ALLOW_META_WEB = .*/ALLOW_META_WEB = \"$mw_var\"/" "$WRANGLER_CFG"
 echo "==> Воркер: web.telegram.org=$tg_worker_state, web.WhatsApp=$wa_worker_state, веб-Instagram/Facebook=$mw_worker_state" >&2
 
 # Имя воркера -- СВОЁ на каждый сервер (2026-11-13). Раньше все серверы
@@ -169,7 +177,7 @@ if [ -z "$WORKER_NAME" ] && [ -f "$ENV_FILE" ]; then
 fi
 [ -n "$WORKER_NAME" ] || WORKER_NAME="zenith-ws-relay-$(hostname -s | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-')"
 echo "==> Деплой воркера $WORKER_NAME (wrangler deploy)..." >&2
-DEPLOY_OUT="$(wrangler deploy --name "$WORKER_NAME" 2>&1)" || { echo "$DEPLOY_OUT" >&2; exit 1; }
+DEPLOY_OUT="$(wrangler deploy -c "$WRANGLER_CFG" --name "$WORKER_NAME" 2>&1)" || { echo "$DEPLOY_OUT" >&2; exit 1; }
 echo "$DEPLOY_OUT" >&2
 
 WORKER_HOST="$(printf '%s\n' "$DEPLOY_OUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1 | sed 's#^https://##')"
@@ -182,7 +190,7 @@ echo "==> Воркер: https://$WORKER_HOST" >&2
 
 echo "==> Генерирую новый RELAY_SECRET (свой на этот сервер, не переиспользуется)..." >&2
 SECRET="$(openssl rand -hex 32)"
-printf '%s' "$SECRET" | wrangler secret put RELAY_SECRET --name "$WORKER_NAME" >&2
+printf '%s' "$SECRET" | wrangler secret put RELAY_SECRET -c "$WRANGLER_CFG" --name "$WORKER_NAME" >&2
 
 # Идемпотентная запись в env-файл -- та же sed-или-append схема, что
 # z0r уже использует для ZENITH_PROFILES и т.п. (см. z2r_autobench/z0r).

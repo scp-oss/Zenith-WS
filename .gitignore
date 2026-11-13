@@ -1,3 +1,4 @@
 .venv/
 __pycache__/
 *.pyc
+relay/cf_worker/wrangler.generated.toml
