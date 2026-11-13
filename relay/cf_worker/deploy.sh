@@ -143,7 +143,17 @@ tg_var="true"; [ "$tg_worker_state" = "disabled" ] && tg_var="false"
 wa_var="true"; [ "$wa_worker_state" = "disabled" ] && wa_var="false"
 sed -i "s/^ALLOW_TELEGRAM = .*/ALLOW_TELEGRAM = \"$tg_var\"/" wrangler.toml
 sed -i "s/^ALLOW_WHATSAPP = .*/ALLOW_WHATSAPP = \"$wa_var\"/" wrangler.toml
-echo "==> Воркер: web.telegram.org=$tg_worker_state, web.WhatsApp=$wa_worker_state" >&2
+# Веб-Instagram/Facebook (2026-11-13) -- по умолчанию ВЫКЛЮЧЕН, включается
+# ZWS_META_WEB_WORKER=enabled в $ENV_FILE.
+mw_worker_state="disabled"
+if [ -f "$ENV_FILE" ]; then
+  mw_worker_state="$(grep '^ZWS_META_WEB_WORKER=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
+  [ -n "$mw_worker_state" ] || mw_worker_state="disabled"
+fi
+mw_var="false"; [ "$mw_worker_state" = "enabled" ] && mw_var="true"
+grep -q '^ALLOW_META_WEB = ' wrangler.toml || printf '\nALLOW_META_WEB = "false"\n' >> wrangler.toml
+sed -i "s/^ALLOW_META_WEB = .*/ALLOW_META_WEB = \"$mw_var\"/" wrangler.toml
+echo "==> Воркер: web.telegram.org=$tg_worker_state, web.WhatsApp=$wa_worker_state, веб-Instagram/Facebook=$mw_worker_state" >&2
 
 echo "==> Деплой воркера (wrangler deploy)..." >&2
 DEPLOY_OUT="$(wrangler deploy 2>&1)" || { echo "$DEPLOY_OUT" >&2; exit 1; }
@@ -212,6 +222,17 @@ if [ "$SKIP_REDIRECT" = "0" ]; then
   else
     echo "==> Применяю REDIRECT (WhatsApp, порты 443+5222 -- см. CLAUDE.md 2026-09-09)..." >&2
     "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/whatsapp_ipv4.txt" --dports 443,5222
+  fi
+  mw_state="disabled"
+  if [ -f "$ENV_FILE" ]; then
+    mw_state="$(grep '^ZWS_META_WEB_REDIRECT=' "$ENV_FILE" | tail -1 | cut -d= -f2-)" || true
+    [ -n "$mw_state" ] || mw_state="disabled"
+  fi
+  if [ "$mw_state" = "enabled" ]; then
+    echo "==> Применяю REDIRECT (веб-Instagram/Facebook, cidr/meta_web_ipv4.txt)..." >&2
+    "$RELAY_DIR/setup_redirect.sh" apply --cidr-file "$RELAY_DIR/../cidr/meta_web_ipv4.txt" --dports 443
+  else
+    echo "==> REDIRECT веб-Instagram/Facebook выключен (ZWS_META_WEB_REDIRECT в $ENV_FILE != enabled)." >&2
   fi
 fi
 
